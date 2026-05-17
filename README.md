@@ -1,6 +1,6 @@
 # adf
 
-Lightweight Rust parsing and writing for ADF 1.0 XML leads.
+Lightweight Rust parsing and writing for Auto-lead Data Format (ADF) 1.0 XML leads.
 
 This crate is aimed at low-overhead ADF processing:
 
@@ -11,6 +11,13 @@ This crate is aimed at low-overhead ADF processing:
 - can write the original document byte-for-byte when it has not been changed
 - can rewrite only dirty prospect spans for localized edits
 - keeps ADF-specific validation separate from XML parsing
+
+## Installation
+
+```toml
+[dependencies]
+adf = "0.1"
+```
 
 ## Example
 
@@ -67,6 +74,15 @@ fn main() -> Result<(), adf::Error> {
 ```
 
 The current validator focuses on structural warnings and errors for the supported model surface.
+
+## License
+
+Licensed under either of:
+
+- Apache License, Version 2.0
+- MIT license
+
+at your option.
 
 ## Development
 

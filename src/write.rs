@@ -430,9 +430,7 @@ fn attrs_preserving_known<'a>(
     }
 
     for (index, (name, value)) in known.iter().enumerate() {
-        if !emitted[index]
-            && let Some(value) = value
-        {
+        if let (false, Some(value)) = (emitted[index], value) {
             output.push(Some((*name, value)));
         }
     }

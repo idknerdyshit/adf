@@ -2,6 +2,15 @@
 name = "adf"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Minimal-overhead Auto-lead Data Format XML parser and writer"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/idknerdyshit/adf"
+homepage = "https://github.com/idknerdyshit/adf"
+documentation = "https://docs.rs/adf"
+readme = "README.md"
+keywords = ["adf", "auto-lead", "xml", "leads", "serialization"]
+categories = ["encoding", "parser-implementations"]
 
 [dependencies]
 quick-xml = "0.38.4"
