@@ -7,10 +7,11 @@ This crate is aimed at low-overhead ADF processing:
 - parses XML with `quick-xml`
 - borrows input text where possible through `Cow<'a, str>`
 - exposes a typed ADF model for common lead fields
-- keeps unknown XML elements and attributes instead of discarding partner data
+- keeps unknown XML elements and attributes — on containers and compact elements alike — instead of discarding partner data
+- preserves CDATA wrappers and unknown entity references through the typed writer
 - can write the original document byte-for-byte when it has not been changed
 - can rewrite only dirty prospect spans for localized edits
-- keeps ADF-specific validation separate from XML parsing
+- keeps ADF-specific validation separate from XML parsing, with optional strict mode plus DTD enum and ISO format checks
 
 ## Installation
 
@@ -73,7 +74,9 @@ fn main() -> Result<(), adf::Error> {
 }
 ```
 
-The current validator focuses on structural warnings and errors for the supported model surface.
+The default validator reports DTD-required elements as warnings, checks DTD enumerated attribute values (`prospect@status`, `vehicle@interest`, `price@type`, etc.), and warns on malformed ISO 8601 dates, ISO 4217 currency codes, and ISO 3166 country codes.
+
+`AdfDocument::validate_strict()` (or `validate_with(adf, ValidationOptions { strict: true })`) promotes the "missing required element" warnings to errors, suitable for gating on conformance.
 
 ## License
 

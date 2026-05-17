@@ -38,6 +38,8 @@ Two distinctions are load-bearing:
 ## Development Notes
 
 - Prefer preserving input data over normalizing it away.
-- Keep unknown XML elements in `extensions` and unknown attributes on typed compact elements when rewriting.
-- Keep parsing allocation-conscious: borrow input text via `Cow<'a, str>` where possible and allocate only when decoding or joining requires it.
+- Keep unknown XML elements in `extensions` and unknown attributes on every typed element (containers and compact alike) so partner data round-trips.
+- Text-bearing elements (`TextElement`, `Id`, `Price`, `Name`) store children as `Vec<TextPart>` so CDATA wrappers and entity refs survive the writer; use `.value()` to get the joined string and `.set_value(...)` to replace it.
+- Keep parsing allocation-conscious: borrow input text (element names, attribute names/values, text segments) via `Cow<'a, str>` where possible and allocate only when decoding or joining requires it.
+- Validator has a lenient default and a strict mode (`AdfDocument::validate_strict` / `validate_with`). Add new structural rules under the strict toggle and keep format/enum checks as warnings in both modes.
 - Add regression tests for every parser or writer bug fix.
