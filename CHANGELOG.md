@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-17
+
 ### Added
 
 - `TextPart` enum and `parts: Vec<TextPart<'a>>` on `TextElement`, `Id`, `Price`, and `Name` so CDATA wrappers and unknown entity references round-trip through the typed writer.
