@@ -1,7 +1,6 @@
 use crate::Result;
 use crate::document::{AdfDocument, Attribute, XmlElement, XmlNode};
 use crate::model::*;
-use std::borrow::Cow;
 use std::io::Write;
 
 pub(crate) fn write_adf<W: Write>(mut writer: W, adf: &Adf<'_>) -> Result<()> {
@@ -47,11 +46,9 @@ pub(crate) fn write_original_preserving<W: Write>(
 }
 
 pub(crate) fn write_prospect<W: Write>(writer: &mut W, prospect: &Prospect<'_>) -> Result<()> {
-    start(
-        writer,
-        "prospect",
-        &[maybe_attr("status", &prospect.status)],
-    )?;
+    let known = [("status", prospect.status.as_deref())];
+    let attrs = attrs_preserving_known(&prospect.attributes, &known);
+    start(writer, "prospect", &attrs)?;
     for id in &prospect.ids {
         write_id(writer, id)?;
     }
@@ -75,14 +72,12 @@ pub(crate) fn write_prospect<W: Write>(writer: &mut W, prospect: &Prospect<'_>) 
 }
 
 fn write_vehicle<W: Write>(writer: &mut W, vehicle: &Vehicle<'_>) -> Result<()> {
-    start(
-        writer,
-        "vehicle",
-        &[
-            maybe_attr("interest", &vehicle.interest),
-            maybe_attr("status", &vehicle.status),
-        ],
-    )?;
+    let known = [
+        ("interest", vehicle.interest.as_deref()),
+        ("status", vehicle.status.as_deref()),
+    ];
+    let attrs = attrs_preserving_known(&vehicle.attributes, &known);
+    start(writer, "vehicle", &attrs)?;
     for id in &vehicle.ids {
         write_id(writer, id)?;
     }
@@ -121,7 +116,8 @@ fn write_vehicle<W: Write>(writer: &mut W, vehicle: &Vehicle<'_>) -> Result<()> 
 }
 
 fn write_color_combination<W: Write>(writer: &mut W, colors: &ColorCombination<'_>) -> Result<()> {
-    start(writer, "colorcombination", &[])?;
+    let attrs = attrs_from_slice(&colors.attributes);
+    start(writer, "colorcombination", &attrs)?;
     write_opt_text(writer, "interiorcolor", &colors.interior_color)?;
     write_opt_text(writer, "exteriorcolor", &colors.exterior_color)?;
     write_opt_text(writer, "preference", &colors.preference)?;
@@ -132,7 +128,8 @@ fn write_color_combination<W: Write>(writer: &mut W, colors: &ColorCombination<'
 }
 
 fn write_option<W: Write>(writer: &mut W, option: &VehicleOption<'_>) -> Result<()> {
-    start(writer, "option", &[])?;
+    let attrs = attrs_from_slice(&option.attributes);
+    start(writer, "option", &attrs)?;
     write_opt_text(writer, "optionname", &option.option_name)?;
     write_opt_text(writer, "manufacturercode", &option.manufacturer_code)?;
     write_opt_text(writer, "stock", &option.stock)?;
@@ -147,7 +144,8 @@ fn write_option<W: Write>(writer: &mut W, option: &VehicleOption<'_>) -> Result<
 }
 
 fn write_finance<W: Write>(writer: &mut W, finance: &Finance<'_>) -> Result<()> {
-    start(writer, "finance", &[])?;
+    let attrs = attrs_from_slice(&finance.attributes);
+    start(writer, "finance", &attrs)?;
     write_opt_text(writer, "method", &finance.method)?;
     for amount in &finance.amounts {
         write_text(writer, "amount", amount)?;
@@ -162,12 +160,13 @@ fn write_finance<W: Write>(writer: &mut W, finance: &Finance<'_>) -> Result<()> 
 }
 
 fn write_customer<W: Write>(writer: &mut W, customer: &Customer<'_>) -> Result<()> {
-    start(writer, "customer", &[])?;
-    for id in &customer.ids {
-        write_id(writer, id)?;
-    }
+    let attrs = attrs_from_slice(&customer.attributes);
+    start(writer, "customer", &attrs)?;
     for contact in &customer.contacts {
         write_contact(writer, contact)?;
+    }
+    for id in &customer.ids {
+        write_id(writer, id)?;
     }
     if let Some(timeframe) = &customer.timeframe {
         write_timeframe(writer, timeframe)?;
@@ -180,7 +179,8 @@ fn write_customer<W: Write>(writer: &mut W, customer: &Customer<'_>) -> Result<(
 }
 
 fn write_timeframe<W: Write>(writer: &mut W, timeframe: &Timeframe<'_>) -> Result<()> {
-    start(writer, "timeframe", &[])?;
+    let attrs = attrs_from_slice(&timeframe.attributes);
+    start(writer, "timeframe", &attrs)?;
     write_opt_text(writer, "description", &timeframe.description)?;
     write_opt_text(writer, "earliestdate", &timeframe.earliest_date)?;
     write_opt_text(writer, "latestdate", &timeframe.latest_date)?;
@@ -191,7 +191,8 @@ fn write_timeframe<W: Write>(writer: &mut W, timeframe: &Timeframe<'_>) -> Resul
 }
 
 fn write_vendor<W: Write>(writer: &mut W, vendor: &Vendor<'_>) -> Result<()> {
-    start(writer, "vendor", &[])?;
+    let attrs = attrs_from_slice(&vendor.attributes);
+    start(writer, "vendor", &attrs)?;
     for id in &vendor.ids {
         write_id(writer, id)?;
     }
@@ -207,7 +208,8 @@ fn write_vendor<W: Write>(writer: &mut W, vendor: &Vendor<'_>) -> Result<()> {
 }
 
 fn write_provider<W: Write>(writer: &mut W, provider: &Provider<'_>) -> Result<()> {
-    start(writer, "provider", &[])?;
+    let attrs = attrs_from_slice(&provider.attributes);
+    start(writer, "provider", &attrs)?;
     for id in &provider.ids {
         write_id(writer, id)?;
     }
@@ -228,11 +230,9 @@ fn write_provider<W: Write>(writer: &mut W, provider: &Provider<'_>) -> Result<(
 }
 
 fn write_contact<W: Write>(writer: &mut W, contact: &Contact<'_>) -> Result<()> {
-    start(
-        writer,
-        "contact",
-        &[maybe_attr("primarycontact", &contact.primary_contact)],
-    )?;
+    let known = [("primarycontact", contact.primary_contact.as_deref())];
+    let attrs = attrs_preserving_known(&contact.attributes, &known);
+    start(writer, "contact", &attrs)?;
     for name in &contact.names {
         write_name(writer, name)?;
     }
@@ -252,11 +252,9 @@ fn write_contact<W: Write>(writer: &mut W, contact: &Contact<'_>) -> Result<()> 
 }
 
 fn write_address<W: Write>(writer: &mut W, address: &Address<'_>) -> Result<()> {
-    start(
-        writer,
-        "address",
-        &[maybe_attr("type", &address.address_type)],
-    )?;
+    let known = [("type", address.address_type.as_deref())];
+    let attrs = attrs_preserving_known(&address.attributes, &known);
+    start(writer, "address", &attrs)?;
     for street in &address.streets {
         write_text(writer, "street", street)?;
     }
@@ -277,7 +275,7 @@ fn write_id<W: Write>(writer: &mut W, id: &Id<'_>) -> Result<()> {
         ("source", id.source.as_deref()),
     ];
     let attrs = attrs_preserving_known(&id.attributes, &known);
-    write_value(writer, "id", &attrs, &id.value)
+    write_parts(writer, "id", &attrs, &id.parts)
 }
 
 fn write_price<W: Write>(writer: &mut W, price: &Price<'_>) -> Result<()> {
@@ -289,7 +287,7 @@ fn write_price<W: Write>(writer: &mut W, price: &Price<'_>) -> Result<()> {
         ("source", price.source.as_deref()),
     ];
     let attrs = attrs_preserving_known(&price.attributes, &known);
-    write_value(writer, "price", &attrs, &price.value)
+    write_parts(writer, "price", &attrs, &price.parts)
 }
 
 fn write_name<W: Write>(writer: &mut W, name: &Name<'_>) -> Result<()> {
@@ -298,7 +296,7 @@ fn write_name<W: Write>(writer: &mut W, name: &Name<'_>) -> Result<()> {
         ("type", name.name_type.as_deref()),
     ];
     let attrs = attrs_preserving_known(&name.attributes, &known);
-    write_value(writer, "name", &attrs, &name.value)
+    write_parts(writer, "name", &attrs, &name.parts)
 }
 
 fn write_opt_text<W: Write>(
@@ -314,28 +312,62 @@ fn write_opt_text<W: Write>(
 
 fn write_text<W: Write>(writer: &mut W, name: &str, value: &TextElement<'_>) -> Result<()> {
     let attrs = attrs_from_slice(&value.attributes);
-    write_value(writer, name, &attrs, &value.value)
+    write_parts(writer, name, &attrs, &value.parts)
 }
 
-fn write_value<W: Write>(
+fn write_parts<W: Write>(
     writer: &mut W,
     name: &str,
     attrs: &[Option<(&str, &str)>],
-    value: &str,
+    parts: &[TextPart<'_>],
 ) -> Result<()> {
     start(writer, name, attrs)?;
-    write_escaped_text(writer, value)?;
+    write_text_parts(writer, parts)?;
     end(writer, name)
+}
+
+fn write_text_parts<W: Write>(writer: &mut W, parts: &[TextPart<'_>]) -> Result<()> {
+    for part in parts {
+        match part {
+            TextPart::Text(text) => write_escaped_text(writer, text)?,
+            TextPart::CData(text) => write_cdata(writer, text)?,
+            TextPart::EntityRef(name) => {
+                writer.write_all(b"&")?;
+                writer.write_all(name.as_bytes())?;
+                writer.write_all(b";")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_cdata<W: Write>(writer: &mut W, text: &str) -> Result<()> {
+    let mut remaining = text;
+    loop {
+        if let Some(index) = remaining.find("]]>") {
+            let (head, tail) = remaining.split_at(index + 2);
+            writer.write_all(b"<![CDATA[")?;
+            writer.write_all(head.as_bytes())?;
+            writer.write_all(b"]]>")?;
+            remaining = tail;
+        } else {
+            writer.write_all(b"<![CDATA[")?;
+            writer.write_all(remaining.as_bytes())?;
+            writer.write_all(b"]]>")?;
+            return Ok(());
+        }
+    }
 }
 
 fn write_xml_node<W: Write>(writer: &mut W, node: &XmlNode<'_>) -> Result<()> {
     match node {
         XmlNode::Element(element) => write_xml_element(writer, element),
         XmlNode::Text(text) => write_escaped_text(writer, text),
-        XmlNode::CData(text) => {
-            writer.write_all(b"<![CDATA[")?;
-            writer.write_all(text.as_bytes())?;
-            writer.write_all(b"]]>")?;
+        XmlNode::CData(text) => write_cdata(writer, text),
+        XmlNode::EntityRef(name) => {
+            writer.write_all(b"&")?;
+            writer.write_all(name.as_bytes())?;
+            writer.write_all(b";")?;
             Ok(())
         }
         XmlNode::Comment(comment) => {
@@ -393,10 +425,6 @@ fn end<W: Write>(writer: &mut W, name: &str) -> Result<()> {
     writer.write_all(name.as_bytes())?;
     writer.write_all(b">")?;
     Ok(())
-}
-
-fn maybe_attr<'a>(name: &'a str, value: &'a Option<Cow<'_, str>>) -> Option<(&'a str, &'a str)> {
-    value.as_deref().map(|value| (name, value))
 }
 
 fn attrs_from_slice<'a>(attributes: &'a [Attribute<'a>]) -> Vec<Option<(&'a str, &'a str)>> {

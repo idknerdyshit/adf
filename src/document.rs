@@ -29,6 +29,7 @@ pub enum XmlNode<'a> {
     Element(XmlElement<'a>),
     Text(Cow<'a, str>),
     CData(Cow<'a, str>),
+    EntityRef(Cow<'a, str>),
     Comment(Cow<'a, str>),
     ProcessingInstruction(Cow<'a, str>),
     Declaration(Cow<'a, str>),
@@ -93,6 +94,10 @@ impl<'a> AdfDocument<'a> {
 
     pub fn validate(&self) -> validate::ValidationReport<'a> {
         validate::validate(&self.adf)
+    }
+
+    pub fn validate_strict(&self) -> validate::ValidationReport<'a> {
+        validate::validate_with(&self.adf, validate::ValidationOptions { strict: true })
     }
 
     pub fn write_original_preserving<W: Write>(&self, writer: W) -> Result<()> {

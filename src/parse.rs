@@ -27,6 +27,7 @@ fn parse_tree(input: &str) -> Result<XmlElement<'_>> {
             .map_err(|source| Error::xml(position, source))?
         {
             Event::Start(start) => stack.push(element_from_start(
+                input,
                 &reader,
                 start,
                 position,
@@ -38,6 +39,7 @@ fn parse_tree(input: &str) -> Result<XmlElement<'_>> {
                     &mut stack,
                     &mut root,
                     element_from_start(
+                        input,
                         &reader,
                         start,
                         position,
@@ -127,7 +129,7 @@ fn parse_tree(input: &str) -> Result<XmlElement<'_>> {
                 append_node(
                     &mut stack,
                     root.is_some(),
-                    XmlNode::Text(resolve_general_ref(entity, position)?),
+                    general_ref_node(entity, position)?,
                     position,
                 )?;
             }
@@ -146,28 +148,36 @@ fn parse_tree(input: &str) -> Result<XmlElement<'_>> {
 }
 
 fn element_from_start<'a>(
+    input: &'a str,
     reader: &Reader<&'a [u8]>,
     start: BytesStart<'a>,
     position: u64,
     span_start: usize,
     span_end: usize,
 ) -> Result<XmlElement<'a>> {
-    let name = name_from_bytes(start.name().as_ref(), position)?.to_owned();
+    let name = borrowed_name(input, start.name().as_ref(), position)?;
     let mut attributes = Vec::new();
     for attr in start.attributes() {
         let attr = attr.map_err(|source| Error::Attribute { position, source })?;
-        let attr_name = name_from_bytes(attr.key.as_ref(), position)?.to_owned();
+        let attr_name = borrowed_name(input, attr.key.as_ref(), position)?;
         let value = attr
             .decode_and_unescape_value(reader.decoder())
             .map_err(|source| Error::xml(position, source))?;
+        let value = match value {
+            Cow::Borrowed(slice) => match borrowed_from_input(input, slice.as_bytes()) {
+                Some(borrowed) => Cow::Borrowed(borrowed),
+                None => Cow::Owned(slice.to_owned()),
+            },
+            Cow::Owned(owned) => Cow::Owned(owned),
+        };
         attributes.push(Attribute {
-            name: Cow::Owned(attr_name),
-            value: Cow::Owned(value.into_owned()),
+            name: attr_name,
+            value,
         });
     }
 
     Ok(XmlElement {
-        name: Cow::Owned(name),
+        name,
         attributes,
         children: Vec::new(),
         span: Span {
@@ -214,12 +224,36 @@ fn name_from_bytes(bytes: &[u8], position: u64) -> Result<&str> {
     str::from_utf8(bytes).map_err(|source| Error::Utf8 { position, source })
 }
 
+fn borrowed_name<'a>(input: &'a str, bytes: &[u8], position: u64) -> Result<Cow<'a, str>> {
+    let name = name_from_bytes(bytes, position)?;
+    Ok(match borrowed_from_input(input, bytes) {
+        Some(borrowed) => Cow::Borrowed(borrowed),
+        None => Cow::Owned(name.to_owned()),
+    })
+}
+
+fn borrowed_from_input<'a>(input: &'a str, bytes: &[u8]) -> Option<&'a str> {
+    let input_bytes = input.as_bytes();
+    let input_start = input_bytes.as_ptr() as usize;
+    let input_end = input_start + input_bytes.len();
+    let bytes_start = bytes.as_ptr() as usize;
+    let bytes_end = bytes_start + bytes.len();
+
+    if bytes_start < input_start || bytes_end > input_end {
+        return None;
+    }
+
+    let offset = bytes_start - input_start;
+    let end = offset + bytes.len();
+    input.get(offset..end)
+}
+
 fn is_document_misc(node: &XmlNode<'_>, has_root: bool) -> bool {
     match node {
         XmlNode::Text(text) => text.as_ref().bytes().all(is_xml_whitespace),
         XmlNode::Comment(_) | XmlNode::ProcessingInstruction(_) => true,
         XmlNode::Declaration(_) | XmlNode::DocType(_) => !has_root,
-        XmlNode::CData(_) | XmlNode::Element(_) => false,
+        XmlNode::CData(_) | XmlNode::EntityRef(_) | XmlNode::Element(_) => false,
     }
 }
 
@@ -227,14 +261,14 @@ fn is_xml_whitespace(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
 }
 
-fn resolve_general_ref(entity: Cow<'_, str>, position: u64) -> Result<Cow<'_, str>> {
-    match entity.as_ref() {
-        "amp" => Ok(Cow::Borrowed("&")),
-        "lt" => Ok(Cow::Borrowed("<")),
-        "gt" => Ok(Cow::Borrowed(">")),
-        "quot" => Ok(Cow::Borrowed("\"")),
-        "apos" => Ok(Cow::Borrowed("'")),
-        _ => decode_character_reference(entity, position),
+fn general_ref_node<'a>(entity: Cow<'a, str>, position: u64) -> Result<XmlNode<'a>> {
+    if let Some(resolved) = resolve_standard_entity(&entity) {
+        return Ok(XmlNode::Text(Cow::Borrowed(resolved)));
+    }
+    if entity.starts_with('#') {
+        Ok(XmlNode::Text(decode_character_reference(entity, position)?))
+    } else {
+        Ok(XmlNode::EntityRef(entity))
     }
 }
 
@@ -287,6 +321,7 @@ fn adf_from_root<'a>(root: &XmlElement<'a>) -> (Adf<'a>, Vec<Range<usize>>) {
 fn prospect_from_element<'a>(element: &XmlElement<'a>) -> Prospect<'a> {
     let mut prospect = Prospect {
         status: attr(element, "status"),
+        attributes: element.attributes.clone(),
         ..Default::default()
     };
 
@@ -309,6 +344,7 @@ fn vehicle_from_element<'a>(element: &XmlElement<'a>) -> Vehicle<'a> {
     let mut vehicle = Vehicle {
         interest: attr(element, "interest"),
         status: attr(element, "status"),
+        attributes: element.attributes.clone(),
         ..Default::default()
     };
 
@@ -331,9 +367,7 @@ fn vehicle_from_element<'a>(element: &XmlElement<'a>) -> Vehicle<'a> {
                 .push(color_combination_from_element(child)),
             "imagetag" => vehicle.image_tags.push(text_from_element(child)),
             "price" => vehicle.prices.push(price_from_element(child)),
-            "pricecomments" | "pricecomment" => {
-                vehicle.price_comments = Some(text_from_element(child))
-            }
+            "pricecomments" => vehicle.price_comments = Some(text_from_element(child)),
             "option" => vehicle.options.push(option_from_element(child)),
             "finance" => vehicle.finance = Some(finance_from_element(child)),
             "comments" => vehicle.comments = Some(text_from_element(child)),
@@ -345,7 +379,10 @@ fn vehicle_from_element<'a>(element: &XmlElement<'a>) -> Vehicle<'a> {
 }
 
 fn color_combination_from_element<'a>(element: &XmlElement<'a>) -> ColorCombination<'a> {
-    let mut colors = ColorCombination::default();
+    let mut colors = ColorCombination {
+        attributes: element.attributes.clone(),
+        ..Default::default()
+    };
     for child in element_children(element) {
         match child.name.as_ref() {
             "interiorcolor" => colors.interior_color = Some(text_from_element(child)),
@@ -358,7 +395,10 @@ fn color_combination_from_element<'a>(element: &XmlElement<'a>) -> ColorCombinat
 }
 
 fn option_from_element<'a>(element: &XmlElement<'a>) -> VehicleOption<'a> {
-    let mut option = VehicleOption::default();
+    let mut option = VehicleOption {
+        attributes: element.attributes.clone(),
+        ..Default::default()
+    };
     for child in element_children(element) {
         match child.name.as_ref() {
             "optionname" => option.option_name = Some(text_from_element(child)),
@@ -373,7 +413,10 @@ fn option_from_element<'a>(element: &XmlElement<'a>) -> VehicleOption<'a> {
 }
 
 fn finance_from_element<'a>(element: &XmlElement<'a>) -> Finance<'a> {
-    let mut finance = Finance::default();
+    let mut finance = Finance {
+        attributes: element.attributes.clone(),
+        ..Default::default()
+    };
     for child in element_children(element) {
         match child.name.as_ref() {
             "method" => finance.method = Some(text_from_element(child)),
@@ -386,7 +429,10 @@ fn finance_from_element<'a>(element: &XmlElement<'a>) -> Finance<'a> {
 }
 
 fn customer_from_element<'a>(element: &XmlElement<'a>) -> Customer<'a> {
-    let mut customer = Customer::default();
+    let mut customer = Customer {
+        attributes: element.attributes.clone(),
+        ..Default::default()
+    };
     for child in element_children(element) {
         match child.name.as_ref() {
             "id" => customer.ids.push(id_from_element(child)),
@@ -400,7 +446,10 @@ fn customer_from_element<'a>(element: &XmlElement<'a>) -> Customer<'a> {
 }
 
 fn timeframe_from_element<'a>(element: &XmlElement<'a>) -> Timeframe<'a> {
-    let mut timeframe = Timeframe::default();
+    let mut timeframe = Timeframe {
+        attributes: element.attributes.clone(),
+        ..Default::default()
+    };
     for child in element_children(element) {
         match child.name.as_ref() {
             "description" => timeframe.description = Some(text_from_element(child)),
@@ -413,7 +462,10 @@ fn timeframe_from_element<'a>(element: &XmlElement<'a>) -> Timeframe<'a> {
 }
 
 fn vendor_from_element<'a>(element: &XmlElement<'a>) -> Vendor<'a> {
-    let mut vendor = Vendor::default();
+    let mut vendor = Vendor {
+        attributes: element.attributes.clone(),
+        ..Default::default()
+    };
     for child in element_children(element) {
         match child.name.as_ref() {
             "id" => vendor.ids.push(id_from_element(child)),
@@ -427,7 +479,10 @@ fn vendor_from_element<'a>(element: &XmlElement<'a>) -> Vendor<'a> {
 }
 
 fn provider_from_element<'a>(element: &XmlElement<'a>) -> Provider<'a> {
-    let mut provider = Provider::default();
+    let mut provider = Provider {
+        attributes: element.attributes.clone(),
+        ..Default::default()
+    };
     for child in element_children(element) {
         match child.name.as_ref() {
             "id" => provider.ids.push(id_from_element(child)),
@@ -446,6 +501,7 @@ fn provider_from_element<'a>(element: &XmlElement<'a>) -> Provider<'a> {
 fn contact_from_element<'a>(element: &XmlElement<'a>) -> Contact<'a> {
     let mut contact = Contact {
         primary_contact: attr(element, "primarycontact"),
+        attributes: element.attributes.clone(),
         ..Default::default()
     };
     for child in element_children(element) {
@@ -463,6 +519,7 @@ fn contact_from_element<'a>(element: &XmlElement<'a>) -> Contact<'a> {
 fn address_from_element<'a>(element: &XmlElement<'a>) -> Address<'a> {
     let mut address = Address {
         address_type: attr(element, "type"),
+        attributes: element.attributes.clone(),
         ..Default::default()
     };
     for child in element_children(element) {
@@ -483,7 +540,7 @@ fn id_from_element<'a>(element: &XmlElement<'a>) -> Id<'a> {
     Id {
         sequence: attr(element, "sequence"),
         source: attr(element, "source"),
-        value: text_value(element),
+        parts: text_parts(element),
         attributes: element.attributes.clone(),
     }
 }
@@ -495,7 +552,7 @@ fn price_from_element<'a>(element: &XmlElement<'a>) -> Price<'a> {
         delta: attr(element, "delta"),
         relative_to: attr(element, "relativeto"),
         source: attr(element, "source"),
-        value: text_value(element),
+        parts: text_parts(element),
         attributes: element.attributes.clone(),
     }
 }
@@ -504,34 +561,26 @@ fn name_from_element<'a>(element: &XmlElement<'a>) -> Name<'a> {
     Name {
         part: attr(element, "part"),
         name_type: attr(element, "type"),
-        value: text_value(element),
+        parts: text_parts(element),
         attributes: element.attributes.clone(),
     }
 }
 
 fn text_from_element<'a>(element: &XmlElement<'a>) -> TextElement<'a> {
-    TextElement::new(text_value(element), element.attributes.clone())
+    TextElement::from_parts(text_parts(element), element.attributes.clone())
 }
 
-fn text_value<'a>(element: &XmlElement<'a>) -> Cow<'a, str> {
-    let mut value: Option<Cow<'a, str>> = None;
+fn text_parts<'a>(element: &XmlElement<'a>) -> Vec<TextPart<'a>> {
+    let mut parts = Vec::new();
     for child in &element.children {
-        let piece = match child {
-            XmlNode::Text(text) | XmlNode::CData(text) => text,
+        match child {
+            XmlNode::Text(text) => parts.push(TextPart::Text(text.clone())),
+            XmlNode::CData(text) => parts.push(TextPart::CData(text.clone())),
+            XmlNode::EntityRef(name) => parts.push(TextPart::EntityRef(name.clone())),
             _ => continue,
-        };
-
-        match &mut value {
-            Some(Cow::Owned(existing)) => existing.push_str(piece),
-            Some(existing @ Cow::Borrowed(_)) => {
-                let mut joined = existing.as_ref().to_owned();
-                joined.push_str(piece);
-                *existing = Cow::Owned(joined);
-            }
-            None => value = Some(piece.clone()),
         }
     }
-    value.unwrap_or(Cow::Borrowed(""))
+    parts
 }
 
 fn attr<'a>(element: &XmlElement<'a>, name: &str) -> Option<Cow<'a, str>> {

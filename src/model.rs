@@ -17,6 +17,7 @@ pub struct Prospect<'a> {
     pub vendor: Option<Vendor<'a>>,
     pub provider: Option<Provider<'a>>,
     pub extensions: Vec<XmlNode<'a>>,
+    pub attributes: Vec<Attribute<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -43,6 +44,7 @@ pub struct Vehicle<'a> {
     pub finance: Option<Finance<'a>>,
     pub comments: Option<TextElement<'a>>,
     pub extensions: Vec<XmlNode<'a>>,
+    pub attributes: Vec<Attribute<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -51,6 +53,7 @@ pub struct ColorCombination<'a> {
     pub exterior_color: Option<TextElement<'a>>,
     pub preference: Option<TextElement<'a>>,
     pub extensions: Vec<XmlNode<'a>>,
+    pub attributes: Vec<Attribute<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -61,6 +64,7 @@ pub struct VehicleOption<'a> {
     pub weighting: Option<TextElement<'a>>,
     pub prices: Vec<Price<'a>>,
     pub extensions: Vec<XmlNode<'a>>,
+    pub attributes: Vec<Attribute<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -69,6 +73,7 @@ pub struct Finance<'a> {
     pub amounts: Vec<TextElement<'a>>,
     pub balances: Vec<TextElement<'a>>,
     pub extensions: Vec<XmlNode<'a>>,
+    pub attributes: Vec<Attribute<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -78,6 +83,7 @@ pub struct Customer<'a> {
     pub timeframe: Option<Timeframe<'a>>,
     pub comments: Option<TextElement<'a>>,
     pub extensions: Vec<XmlNode<'a>>,
+    pub attributes: Vec<Attribute<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -86,6 +92,7 @@ pub struct Timeframe<'a> {
     pub earliest_date: Option<TextElement<'a>>,
     pub latest_date: Option<TextElement<'a>>,
     pub extensions: Vec<XmlNode<'a>>,
+    pub attributes: Vec<Attribute<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -95,6 +102,7 @@ pub struct Vendor<'a> {
     pub url: Option<TextElement<'a>>,
     pub contacts: Vec<Contact<'a>>,
     pub extensions: Vec<XmlNode<'a>>,
+    pub attributes: Vec<Attribute<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -107,6 +115,7 @@ pub struct Provider<'a> {
     pub phone: Option<TextElement<'a>>,
     pub contacts: Vec<Contact<'a>>,
     pub extensions: Vec<XmlNode<'a>>,
+    pub attributes: Vec<Attribute<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -117,6 +126,7 @@ pub struct Contact<'a> {
     pub phones: Vec<TextElement<'a>>,
     pub addresses: Vec<Address<'a>>,
     pub extensions: Vec<XmlNode<'a>>,
+    pub attributes: Vec<Attribute<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -129,13 +139,14 @@ pub struct Address<'a> {
     pub postal_code: Option<TextElement<'a>>,
     pub country: Option<TextElement<'a>>,
     pub extensions: Vec<XmlNode<'a>>,
+    pub attributes: Vec<Attribute<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Id<'a> {
     pub sequence: Option<Cow<'a, str>>,
     pub source: Option<Cow<'a, str>>,
-    pub value: Cow<'a, str>,
+    pub parts: Vec<TextPart<'a>>,
     pub attributes: Vec<Attribute<'a>>,
 }
 
@@ -146,7 +157,7 @@ pub struct Price<'a> {
     pub delta: Option<Cow<'a, str>>,
     pub relative_to: Option<Cow<'a, str>>,
     pub source: Option<Cow<'a, str>>,
-    pub value: Cow<'a, str>,
+    pub parts: Vec<TextPart<'a>>,
     pub attributes: Vec<Attribute<'a>>,
 }
 
@@ -154,18 +165,90 @@ pub struct Price<'a> {
 pub struct Name<'a> {
     pub part: Option<Cow<'a, str>>,
     pub name_type: Option<Cow<'a, str>>,
-    pub value: Cow<'a, str>,
+    pub parts: Vec<TextPart<'a>>,
     pub attributes: Vec<Attribute<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TextElement<'a> {
-    pub value: Cow<'a, str>,
+    pub parts: Vec<TextPart<'a>>,
     pub attributes: Vec<Attribute<'a>>,
 }
 
 impl<'a> TextElement<'a> {
     pub fn new(value: Cow<'a, str>, attributes: Vec<Attribute<'a>>) -> Self {
-        Self { value, attributes }
+        Self {
+            parts: vec![TextPart::Text(value)],
+            attributes,
+        }
+    }
+
+    pub fn from_parts(parts: Vec<TextPart<'a>>, attributes: Vec<Attribute<'a>>) -> Self {
+        Self { parts, attributes }
+    }
+}
+
+macro_rules! impl_text_value {
+    ($t:ident) => {
+        impl<'a> $t<'a> {
+            pub fn value(&self) -> Cow<'a, str> {
+                text_parts_value(&self.parts)
+            }
+
+            pub fn set_value(&mut self, value: impl Into<Cow<'a, str>>) {
+                self.parts = vec![TextPart::Text(value.into())];
+            }
+        }
+    };
+}
+
+impl_text_value!(Id);
+impl_text_value!(Price);
+impl_text_value!(Name);
+impl_text_value!(TextElement);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextPart<'a> {
+    Text(Cow<'a, str>),
+    CData(Cow<'a, str>),
+    EntityRef(Cow<'a, str>),
+}
+
+fn text_parts_value<'a>(parts: &[TextPart<'a>]) -> Cow<'a, str> {
+    match parts {
+        [] => Cow::Borrowed(""),
+        [TextPart::Text(text) | TextPart::CData(text)] => text.clone(),
+        [TextPart::EntityRef(name)] => match resolve_standard_entity(name) {
+            Some(resolved) => Cow::Borrowed(resolved),
+            None => Cow::Owned(format!("&{name};")),
+        },
+        _ => {
+            let mut joined = String::new();
+            for part in parts {
+                match part {
+                    TextPart::Text(text) | TextPart::CData(text) => joined.push_str(text),
+                    TextPart::EntityRef(name) => match resolve_standard_entity(name) {
+                        Some(resolved) => joined.push_str(resolved),
+                        None => {
+                            joined.push('&');
+                            joined.push_str(name);
+                            joined.push(';');
+                        }
+                    },
+                }
+            }
+            Cow::Owned(joined)
+        }
+    }
+}
+
+pub(crate) fn resolve_standard_entity(name: &str) -> Option<&'static str> {
+    match name {
+        "amp" => Some("&"),
+        "lt" => Some("<"),
+        "gt" => Some(">"),
+        "quot" => Some("\""),
+        "apos" => Some("'"),
+        _ => None,
     }
 }

@@ -13,7 +13,9 @@ mod write;
 pub use document::{AdfDocument, Attribute, Span, XmlElement, XmlNode};
 pub use error::{Error, Result};
 pub use model::*;
-pub use validate::{Severity, ValidationIssue, ValidationReport};
+pub use validate::{
+    Severity, ValidationIssue, ValidationOptions, ValidationReport, validate, validate_with,
+};
 
 /// Parse an ADF-XML document.
 ///

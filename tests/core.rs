@@ -1,4 +1,4 @@
-use adf::{Severity, XmlNode, parse};
+use adf::{Severity, TextPart, ValidationOptions, XmlNode, parse};
 use pretty_assertions::assert_eq;
 use std::borrow::Cow;
 
@@ -52,7 +52,8 @@ fn parses_core_adf_shape() {
         prospect
             .request_date
             .as_ref()
-            .map(|date| date.value.as_ref()),
+            .map(|date| date.value().into_owned())
+            .as_deref(),
         Some("2000-03-30T15:30:20-08:00")
     );
 
@@ -60,7 +61,11 @@ fn parses_core_adf_shape() {
     assert_eq!(vehicle.interest.as_deref(), Some("buy"));
     assert_eq!(vehicle.status.as_deref(), Some("used"));
     assert_eq!(
-        vehicle.make.as_ref().map(|make| make.value.as_ref()),
+        vehicle
+            .make
+            .as_ref()
+            .map(|make| make.value().into_owned())
+            .as_deref(),
         Some("Chevrolet")
     );
     assert_eq!(vehicle.prices[0].currency.as_deref(), Some("USD"));
@@ -68,7 +73,7 @@ fn parses_core_adf_shape() {
     let customer = prospect.customer.as_ref().unwrap();
     let contact = &customer.contacts[0];
     assert_eq!(contact.primary_contact.as_deref(), Some("1"));
-    assert_eq!(contact.names[0].value.as_ref(), "John");
+    assert_eq!(contact.names[0].value().as_ref(), "John");
     assert_eq!(
         contact.emails[0].attributes[0].name.as_ref(),
         "preferredcontact"
@@ -131,7 +136,7 @@ fn entity_decoding_allocates_only_when_needed() {
         r#"<adf><prospect><customer><contact><name part="full">Jane &amp; Co</name><email>a@example.com</email></contact></customer></prospect></adf>"#,
     )
     .expect("entity should decode");
-    let value = &doc.adf().prospects[0].customer.as_ref().unwrap().contacts[0].names[0].value;
+    let value = doc.adf().prospects[0].customer.as_ref().unwrap().contacts[0].names[0].value();
 
     assert_eq!(value.as_ref(), "Jane & Co");
     assert!(matches!(value, Cow::Owned(_)));
@@ -174,7 +179,7 @@ fn decodes_numeric_character_references() {
         r#"<adf><prospect><customer><contact><name>&#65;&#x42; &amp; Co</name></contact></customer></prospect></adf>"#,
     )
     .expect("numeric character references should parse");
-    let value = &doc.adf().prospects[0].customer.as_ref().unwrap().contacts[0].names[0].value;
+    let value = doc.adf().prospects[0].customer.as_ref().unwrap().contacts[0].names[0].value();
 
     assert_eq!(value.as_ref(), "AB & Co");
     assert!(
@@ -238,7 +243,7 @@ fn original_preserving_writer_replaces_only_dirty_prospect_span() {
         .make
         .as_mut()
         .unwrap()
-        .value = Cow::Borrowed("Honda");
+        .set_value(Cow::Borrowed("Honda"));
 
     assert!(doc.is_dirty());
     let output = doc.to_original_preserving_string().unwrap();
@@ -262,4 +267,246 @@ fn broad_adf_mutation_uses_typed_writer() {
     assert!(output.starts_with("<?xml version=\"1.0\"?>\n<?adf version=\"1.0\"?>\n<adf>"));
     assert!(output.contains("<prospect status=\"contacted\">"));
     assert!(!output.contains("<!-- keep me -->"));
+}
+
+#[test]
+fn typed_writer_emits_contact_before_id_in_customer() {
+    let input = r#"<adf><prospect><customer><id source="crm">99</id><contact><name part="full">A</name><email>a@example.com</email></contact></customer></prospect></adf>"#;
+    let doc = parse(input).expect("valid ADF should parse");
+    let output = doc.to_typed_string().unwrap();
+
+    let contact_at = output.find("<contact").expect("contact element");
+    let id_at = output.find("<id ").expect("id element");
+    assert!(
+        contact_at < id_at,
+        "contact must precede id per DTD: {output}"
+    );
+}
+
+#[test]
+fn typed_writer_preserves_unknown_container_attributes() {
+    let input = r#"<adf><prospect xmlns:p="urn:partner"><vehicle interest="buy" partner-id="x"><year>2024</year><make>Honda</make><model>Civic</model></vehicle><customer><contact partner="y"><name part="full">A</name><email>a@example.com</email></contact></customer></prospect></adf>"#;
+    let doc = parse(input).expect("valid ADF should parse");
+    let output = doc.to_typed_string().unwrap();
+
+    assert!(output.contains(r#"xmlns:p="urn:partner""#));
+    assert!(output.contains(r#"partner-id="x""#));
+    assert!(output.contains(r#"partner="y""#));
+}
+
+#[test]
+fn prospect_rewrite_preserves_unknown_container_attributes() {
+    let input = r#"<adf><prospect>
+  <vehicle interest="buy" partner-id="x"><year>2024</year><make>Honda</make><model>Civic</model></vehicle>
+  <customer><contact partner="y" primarycontact="1"><name part="full">A</name><email>a@example.com</email></contact></customer>
+  <address-meta><address type="home" partner="z"><street>1 Main</street></address></address-meta>
+</prospect></adf>"#;
+
+    let mut doc = parse(input).expect("valid ADF should parse");
+    doc.prospect_mut(0).unwrap().vehicles[0]
+        .make
+        .as_mut()
+        .unwrap()
+        .set_value(Cow::Borrowed("Honda"));
+    let output = doc.to_original_preserving_string().unwrap();
+
+    assert!(output.contains(r#"<vehicle interest="buy" partner-id="x">"#));
+    assert!(output.contains(r#"<contact partner="y" primarycontact="1">"#));
+}
+
+#[test]
+fn typed_writer_preserves_entity_refs() {
+    let input = r#"<adf><prospect><customer><contact><name part="full">A</name><email>a@example.com</email></contact><comments>Jane &amp; &nbsp; Co</comments></customer></prospect></adf>"#;
+    let doc = parse(input).expect("valid ADF should parse");
+    let output = doc.to_typed_string().unwrap();
+
+    assert!(output.contains("Jane &amp; &nbsp; Co"));
+}
+
+#[test]
+fn typed_writer_preserves_cdata_wrapper() {
+    let input = r#"<adf><prospect><customer><contact><name part="full">A</name><email>a@example.com</email></contact><comments><![CDATA[<b>hi</b>]]></comments></customer></prospect></adf>"#;
+    let doc = parse(input).expect("valid ADF should parse");
+    let output = doc.to_typed_string().unwrap();
+
+    assert!(output.contains("<![CDATA[<b>hi</b>]]>"));
+}
+
+#[test]
+fn typed_writer_splits_cdata_containing_terminator() {
+    let parts = vec![TextPart::CData(Cow::Borrowed("before]]>after"))];
+    let mut doc = parse(r#"<adf><prospect><customer><contact><name part="full">A</name><email>a@example.com</email></contact><comments>x</comments></customer></prospect></adf>"#).expect("valid ADF should parse");
+    let comments = doc.adf_mut().prospects[0]
+        .customer
+        .as_mut()
+        .unwrap()
+        .comments
+        .as_mut()
+        .unwrap();
+    comments.parts = parts;
+
+    let output = doc.to_typed_string().unwrap();
+
+    assert!(output.contains("<comments><![CDATA[before]]]]><![CDATA[>after]]></comments>"));
+
+    let reparsed = parse(&output).expect("reparses cleanly");
+    let value = reparsed.adf().prospects[0]
+        .customer
+        .as_ref()
+        .unwrap()
+        .comments
+        .as_ref()
+        .unwrap()
+        .value();
+    assert_eq!(value.as_ref(), "before]]>after");
+}
+
+#[test]
+fn validate_strict_promotes_required_fields_to_errors() {
+    let doc = parse(r#"<adf><prospect><customer><contact /></customer></prospect></adf>"#)
+        .expect("valid ADF should parse");
+
+    let lenient = doc.validate();
+    assert!(lenient.is_valid());
+
+    let strict = doc.validate_strict();
+    assert!(!strict.is_valid());
+    assert!(
+        strict
+            .issues
+            .iter()
+            .any(|issue| issue.severity == Severity::Error && issue.message.contains("vehicle"))
+    );
+}
+
+#[test]
+fn validate_warns_on_bad_enum_values() {
+    let doc = parse(r#"<adf><prospect status="weird"><vehicle interest="loan" status="brand-new"><year>2024</year><make>X</make><model>Y</model><price type="bizarre" currency="USD">1</price></vehicle><customer><contact><name part="full">A</name><email>a@example.com</email></contact></customer><vendor><vendorname>V</vendorname><contact><name part="full">B</name><email>b@example.com</email></contact></vendor></prospect></adf>"#).expect("valid ADF should parse");
+    let report = doc.validate();
+
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.path.contains("@status") && issue.message.contains("weird"))
+    );
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.path.contains("@interest") && issue.message.contains("loan"))
+    );
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.path.contains("price[0]@type") && issue.message.contains("bizarre"))
+    );
+}
+
+#[test]
+fn validate_warns_on_bad_iso_formats() {
+    let doc = parse(r#"<adf><prospect><requestdate>not-a-date</requestdate><vehicle><year>2024</year><make>X</make><model>Y</model><price type="quote" currency="usd">1</price></vehicle><customer><contact><name part="full">A</name><email>a@example.com</email><address type="home"><country>USA</country></address></contact></customer><vendor><vendorname>V</vendorname><contact><name part="full">B</name><email>b@example.com</email></contact></vendor></prospect></adf>"#).expect("valid ADF should parse");
+    let report = doc.validate();
+
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.path.contains("requestdate") && issue.message.contains("ISO"))
+    );
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.path.contains("@currency") && issue.message.contains("4217"))
+    );
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.path.contains("country") && issue.message.contains("3166"))
+    );
+}
+
+#[test]
+fn validate_strict_passes_minimal_spec_example() {
+    let minimal = r#"<?xml version="1.0"?>
+<?adf version="1.0"?>
+<adf>
+  <prospect>
+    <requestdate>2024-01-02T03:04:05-05:00</requestdate>
+    <vehicle>
+      <year>2024</year>
+      <make>Honda</make>
+      <model>Civic</model>
+    </vehicle>
+    <customer>
+      <contact>
+        <name part="full">Jane Doe</name>
+        <email>jane@example.com</email>
+      </contact>
+    </customer>
+    <vendor>
+      <vendorname>Dealer</vendorname>
+      <contact>
+        <name part="full">Sales Desk</name>
+        <email>sales@example.com</email>
+      </contact>
+    </vendor>
+  </prospect>
+</adf>"#;
+
+    let doc = parse(minimal).expect("valid ADF should parse");
+    let report = doc.validate_strict();
+    let errors: Vec<_> = report
+        .issues
+        .iter()
+        .filter(|issue| issue.severity == Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "expected no errors, got: {errors:#?}");
+}
+
+#[test]
+fn validate_with_lenient_options_matches_default() {
+    let doc = parse(r#"<adf><prospect><customer><contact /></customer></prospect></adf>"#)
+        .expect("valid ADF should parse");
+    let lenient = adf::validate_with(doc.adf(), ValidationOptions::default());
+    assert!(lenient.is_valid());
+}
+
+#[test]
+fn pricecomment_singular_survives_as_extension() {
+    let input = r#"<adf><prospect><vehicle><year>2024</year><make>Honda</make><model>Civic</model><pricecomment>special offer</pricecomment></vehicle><customer><contact><name part="full">A</name><email>a@example.com</email></contact></customer></prospect></adf>"#;
+
+    let doc = parse(input).expect("valid ADF should parse");
+    let original = doc.to_original_preserving_string().unwrap();
+    assert_eq!(original, input);
+
+    let vehicle = &doc.adf().prospects[0].vehicles[0];
+    assert!(vehicle.extensions.iter().any(
+        |node| matches!(node, XmlNode::Element(element) if element.name.as_ref() == "pricecomment")
+    ));
+    assert!(vehicle.price_comments.is_none());
+
+    let typed = doc.to_typed_string().unwrap();
+    assert!(typed.contains("<pricecomment>special offer</pricecomment>"));
+    assert!(!typed.contains("<pricecomments>"));
+}
+
+#[test]
+fn parser_borrows_element_names_for_ascii_input() {
+    let input = r#"<adf><prospect><vehicle><year>2024</year></vehicle></prospect></adf>"#;
+    let doc = parse(input).expect("valid ADF should parse");
+    let root = doc.root();
+    let prospect = match &root.children[0] {
+        XmlNode::Element(element) => element,
+        other => panic!("expected element, got {other:?}"),
+    };
+    assert!(matches!(prospect.name, Cow::Borrowed(_)));
+    let vehicle = match &prospect.children[0] {
+        XmlNode::Element(element) => element,
+        other => panic!("expected element, got {other:?}"),
+    };
+    assert!(matches!(vehicle.name, Cow::Borrowed(_)));
 }
