@@ -1,5 +1,6 @@
-use crate::Attribute;
+use crate::document::Span;
 use crate::model::*;
+use crate::{Attribute, TextElement};
 use std::borrow::Cow;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,6 +14,7 @@ pub struct ValidationIssue<'a> {
     pub severity: Severity,
     pub path: Cow<'a, str>,
     pub message: Cow<'a, str>,
+    pub span: Option<Span>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -89,7 +91,11 @@ pub fn validate_with<'a>(adf: &Adf<'a>, options: ValidationOptions) -> Validatio
     let mut report = ValidationReport::default();
 
     if adf.prospects.is_empty() {
-        report.error("adf", "ADF document should contain at least one prospect");
+        report.error(
+            "adf",
+            adf.span,
+            "ADF document should contain at least one prospect",
+        );
     }
 
     for (index, prospect) in adf.prospects.iter().enumerate() {
@@ -109,24 +115,28 @@ fn validate_prospect(
     report.required(
         options,
         path,
+        prospect.span,
         prospect.request_date.is_some(),
         "prospect is missing requestdate",
     );
     report.required(
         options,
         path,
+        prospect.span,
         !prospect.vehicles.is_empty(),
         "prospect is missing vehicle",
     );
     report.required(
         options,
         path,
+        prospect.span,
         prospect.customer.is_some(),
         "prospect is missing customer",
     );
     report.required(
         options,
         path,
+        prospect.span,
         prospect.vendor.is_some(),
         "prospect is missing vendor",
     );
@@ -134,12 +144,18 @@ fn validate_prospect(
     check_enum(
         report,
         format!("{path}@status"),
+        prospect.span,
         prospect.status.as_deref(),
         PROSPECT_STATUS,
     );
 
     if let Some(date) = &prospect.request_date {
-        check_iso_datetime(report, format!("{path}.requestdate"), &date.value());
+        check_iso_datetime(
+            report,
+            format!("{path}.requestdate"),
+            date.span,
+            &date.value(),
+        );
     }
 
     if let Some(customer) = &prospect.customer {
@@ -171,6 +187,7 @@ fn validate_customer(
     report.required(
         options,
         &customer_path,
+        customer.span,
         !customer.contacts.is_empty(),
         "customer is missing contact",
     );
@@ -194,6 +211,7 @@ fn validate_timeframe(
         check_iso_datetime(
             report,
             format!("{customer_path}.timeframe.earliestdate"),
+            date.span,
             &date.value(),
         );
     }
@@ -201,6 +219,7 @@ fn validate_timeframe(
         check_iso_datetime(
             report,
             format!("{customer_path}.timeframe.latestdate"),
+            date.span,
             &date.value(),
         );
     }
@@ -216,12 +235,14 @@ fn validate_vendor(
     report.required(
         options,
         &vendor_path,
+        vendor.span,
         vendor.vendor_name.is_some(),
         "vendor is missing vendorname",
     );
     report.required(
         options,
         &vendor_path,
+        vendor.span,
         !vendor.contacts.is_empty(),
         "vendor is missing contact",
     );
@@ -241,12 +262,14 @@ fn validate_provider(
         check_enum(
             report,
             format!("{provider_path}.name@part"),
+            name.span,
             name.part.as_deref(),
             NAME_PART,
         );
         check_enum(
             report,
             format!("{provider_path}.name@type"),
+            name.span,
             name.name_type.as_deref(),
             NAME_TYPE,
         );
@@ -263,16 +286,22 @@ fn validate_contact(
     report.required(
         options,
         path,
+        contact.span,
         !contact.names.is_empty(),
         "contact is missing name",
     );
     if require_email_or_phone && contact.emails.is_empty() && contact.phones.is_empty() {
-        report.warn(path.to_owned(), "contact should contain email or phone");
+        report.warn(
+            path.to_owned(),
+            contact.span,
+            "contact should contain email or phone",
+        );
     }
 
     check_enum(
         report,
         format!("{path}@primarycontact"),
+        contact.span,
         contact.primary_contact.as_deref(),
         BOOL_FLAG,
     );
@@ -281,12 +310,14 @@ fn validate_contact(
         check_enum(
             report,
             format!("{path}.name[{index}]@part"),
+            name.span,
             name.part.as_deref(),
             NAME_PART,
         );
         check_enum(
             report,
             format!("{path}.name[{index}]@type"),
+            name.span,
             name.name_type.as_deref(),
             NAME_TYPE,
         );
@@ -297,6 +328,7 @@ fn validate_contact(
         check_enum(
             report,
             format!("{path}.email[{index}]@preferredcontact"),
+            email.span,
             preferred,
             BOOL_FLAG,
         );
@@ -307,18 +339,21 @@ fn validate_contact(
         check_enum(
             report,
             format!("{phone_path}@type"),
+            phone.span,
             attr_value(&phone.attributes, "type"),
             PHONE_TYPE,
         );
         check_enum(
             report,
             format!("{phone_path}@time"),
+            phone.span,
             attr_value(&phone.attributes, "time"),
             PHONE_TIME,
         );
         check_enum(
             report,
             format!("{phone_path}@preferredcontact"),
+            phone.span,
             attr_value(&phone.attributes, "preferredcontact"),
             BOOL_FLAG,
         );
@@ -329,11 +364,17 @@ fn validate_contact(
         check_enum(
             report,
             format!("{address_path}@type"),
+            address.span,
             address.address_type.as_deref(),
             ADDRESS_TYPE,
         );
         if let Some(country) = &address.country {
-            check_iso_country(report, format!("{address_path}.country"), &country.value());
+            check_iso_country(
+                report,
+                format!("{address_path}.country"),
+                country.span,
+                &country.value(),
+            );
         }
     }
 }
@@ -347,18 +388,21 @@ fn validate_vehicle(
     report.required(
         options,
         path,
+        vehicle.span,
         vehicle.year.is_some(),
         "vehicle is missing year",
     );
     report.required(
         options,
         path,
+        vehicle.span,
         vehicle.make.is_some(),
         "vehicle is missing make",
     );
     report.required(
         options,
         path,
+        vehicle.span,
         vehicle.model.is_some(),
         "vehicle is missing model",
     );
@@ -366,12 +410,14 @@ fn validate_vehicle(
     check_enum(
         report,
         format!("{path}@interest"),
+        vehicle.span,
         vehicle.interest.as_deref(),
         VEHICLE_INTEREST,
     );
     check_enum(
         report,
         format!("{path}@status"),
+        vehicle.span,
         vehicle.status.as_deref(),
         VEHICLE_STATUS,
     );
@@ -380,12 +426,14 @@ fn validate_vehicle(
         check_enum(
             report,
             format!("{path}.odometer@status"),
+            odometer.span,
             attr_value(&odometer.attributes, "status"),
             ODOMETER_STATUS,
         );
         check_enum(
             report,
             format!("{path}.odometer@units"),
+            odometer.span,
             attr_value(&odometer.attributes, "units"),
             ODOMETER_UNITS,
         );
@@ -397,6 +445,7 @@ fn validate_vehicle(
         if !trimmed.is_empty() && !CONDITION_VALUES.contains(&trimmed) {
             report.warn(
                 format!("{path}.condition"),
+                condition.span,
                 format!("invalid condition value {trimmed:?}"),
             );
         }
@@ -425,23 +474,26 @@ fn validate_price(report: &mut ValidationReport<'_>, path: &str, price: &Price<'
     check_enum(
         report,
         format!("{path}@type"),
+        price.span,
         price.price_type.as_deref(),
         PRICE_TYPE,
     );
     check_enum(
         report,
         format!("{path}@delta"),
+        price.span,
         price.delta.as_deref(),
         PRICE_DELTA,
     );
     check_enum(
         report,
         format!("{path}@relativeto"),
+        price.span,
         price.relative_to.as_deref(),
         PRICE_RELATIVE_TO,
     );
     if let Some(currency) = price.currency.as_deref() {
-        check_iso_currency(report, format!("{path}@currency"), currency);
+        check_iso_currency(report, format!("{path}@currency"), price.span, currency);
     }
 }
 
@@ -452,6 +504,7 @@ fn validate_finance(report: &mut ValidationReport<'_>, path: &str, finance: &Fin
         if !trimmed.is_empty() && !FINANCE_METHOD.contains(&trimmed) {
             report.warn(
                 format!("{path}.method"),
+                method.span,
                 format!("invalid finance method {trimmed:?}"),
             );
         }
@@ -459,34 +512,37 @@ fn validate_finance(report: &mut ValidationReport<'_>, path: &str, finance: &Fin
 
     for (index, amount) in finance.amounts.iter().enumerate() {
         let amount_path = format!("{path}.amount[{index}]");
-        check_enum(
-            report,
-            format!("{amount_path}@type"),
-            attr_value(&amount.attributes, "type"),
-            AMOUNT_TYPE,
-        );
+        validate_amount(report, &amount_path, amount, AMOUNT_TYPE);
         check_enum(
             report,
             format!("{amount_path}@limit"),
+            amount.span,
             attr_value(&amount.attributes, "limit"),
             AMOUNT_LIMIT,
         );
-        if let Some(currency) = attr_value(&amount.attributes, "currency") {
-            check_iso_currency(report, format!("{amount_path}@currency"), currency);
-        }
     }
 
     for (index, balance) in finance.balances.iter().enumerate() {
         let balance_path = format!("{path}.balance[{index}]");
-        check_enum(
-            report,
-            format!("{balance_path}@type"),
-            attr_value(&balance.attributes, "type"),
-            BALANCE_TYPE,
-        );
-        if let Some(currency) = attr_value(&balance.attributes, "currency") {
-            check_iso_currency(report, format!("{balance_path}@currency"), currency);
-        }
+        validate_amount(report, &balance_path, balance, BALANCE_TYPE);
+    }
+}
+
+fn validate_amount(
+    report: &mut ValidationReport<'_>,
+    path: &str,
+    amount: &TextElement<'_>,
+    type_values: &[&str],
+) {
+    check_enum(
+        report,
+        format!("{path}@type"),
+        amount.span,
+        attr_value(&amount.attributes, "type"),
+        type_values,
+    );
+    if let Some(currency) = attr_value(&amount.attributes, "currency") {
+        check_iso_currency(report, format!("{path}@currency"), amount.span, currency);
     }
 }
 
@@ -500,6 +556,7 @@ fn attr_value<'a>(attributes: &'a [Attribute<'a>], name: &str) -> Option<&'a str
 fn check_enum(
     report: &mut ValidationReport<'_>,
     path: String,
+    span: Span,
     value: Option<&str>,
     allowed: &[&str],
 ) {
@@ -510,21 +567,23 @@ fn check_enum(
     let allowed_display = allowed.join(", ");
     report.warn(
         path,
+        span,
         format!("value {value:?} is not one of: {allowed_display}"),
     );
 }
 
-fn check_iso_currency(report: &mut ValidationReport<'_>, path: String, value: &str) {
+fn check_iso_currency(report: &mut ValidationReport<'_>, path: String, span: Span, value: &str) {
     if value.len() == 3 && value.chars().all(|ch| ch.is_ascii_uppercase()) {
         return;
     }
     report.warn(
         path,
+        span,
         format!("currency {value:?} is not a 3-letter ISO 4217 code"),
     );
 }
 
-fn check_iso_country(report: &mut ValidationReport<'_>, path: String, value: &str) {
+fn check_iso_country(report: &mut ValidationReport<'_>, path: String, span: Span, value: &str) {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return;
@@ -534,11 +593,12 @@ fn check_iso_country(report: &mut ValidationReport<'_>, path: String, value: &st
     }
     report.warn(
         path,
+        span,
         format!("country {trimmed:?} is not a 2-letter ISO 3166-1 alpha-2 code"),
     );
 }
 
-fn check_iso_datetime(report: &mut ValidationReport<'_>, path: String, value: &str) {
+fn check_iso_datetime(report: &mut ValidationReport<'_>, path: String, span: Span, value: &str) {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return;
@@ -546,7 +606,11 @@ fn check_iso_datetime(report: &mut ValidationReport<'_>, path: String, value: &s
     if is_iso_datetime(trimmed) {
         return;
     }
-    report.warn(path, format!("date {trimmed:?} is not ISO 8601 datetime"));
+    report.warn(
+        path,
+        span,
+        format!("date {trimmed:?} is not ISO 8601 datetime"),
+    );
 }
 
 fn is_iso_datetime(value: &str) -> bool {
@@ -627,19 +691,31 @@ fn ascii_digits(bytes: &[u8]) -> bool {
 }
 
 impl<'a> ValidationReport<'a> {
-    fn warn(&mut self, path: impl Into<Cow<'a, str>>, message: impl Into<Cow<'a, str>>) {
+    fn warn(
+        &mut self,
+        path: impl Into<Cow<'a, str>>,
+        span: Span,
+        message: impl Into<Cow<'a, str>>,
+    ) {
         self.issues.push(ValidationIssue {
             severity: Severity::Warning,
             path: path.into(),
             message: message.into(),
+            span: span_option(span),
         });
     }
 
-    fn error(&mut self, path: impl Into<Cow<'a, str>>, message: impl Into<Cow<'a, str>>) {
+    fn error(
+        &mut self,
+        path: impl Into<Cow<'a, str>>,
+        span: Span,
+        message: impl Into<Cow<'a, str>>,
+    ) {
         self.issues.push(ValidationIssue {
             severity: Severity::Error,
             path: path.into(),
             message: message.into(),
+            span: span_option(span),
         });
     }
 
@@ -647,6 +723,7 @@ impl<'a> ValidationReport<'a> {
         &mut self,
         options: ValidationOptions,
         path: &str,
+        span: Span,
         present: bool,
         message: &'static str,
     ) {
@@ -654,9 +731,17 @@ impl<'a> ValidationReport<'a> {
             return;
         }
         if options.strict {
-            self.error(path.to_owned(), message);
+            self.error(path.to_owned(), span, message);
         } else {
-            self.warn(path.to_owned(), message);
+            self.warn(path.to_owned(), span, message);
         }
+    }
+}
+
+fn span_option(span: Span) -> Option<Span> {
+    if span.start == 0 && span.end == 0 {
+        None
+    } else {
+        Some(span)
     }
 }

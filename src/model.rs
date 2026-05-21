@@ -1,10 +1,11 @@
-use crate::{Attribute, XmlNode};
+use crate::{Attribute, Span, XmlNode};
 use std::borrow::Cow;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Adf<'a> {
     pub prospects: Vec<Prospect<'a>>,
     pub extensions: Vec<XmlNode<'a>>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -18,6 +19,7 @@ pub struct Prospect<'a> {
     pub provider: Option<Provider<'a>>,
     pub extensions: Vec<XmlNode<'a>>,
     pub attributes: Vec<Attribute<'a>>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -45,6 +47,7 @@ pub struct Vehicle<'a> {
     pub comments: Option<TextElement<'a>>,
     pub extensions: Vec<XmlNode<'a>>,
     pub attributes: Vec<Attribute<'a>>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -54,6 +57,7 @@ pub struct ColorCombination<'a> {
     pub preference: Option<TextElement<'a>>,
     pub extensions: Vec<XmlNode<'a>>,
     pub attributes: Vec<Attribute<'a>>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -65,6 +69,7 @@ pub struct VehicleOption<'a> {
     pub prices: Vec<Price<'a>>,
     pub extensions: Vec<XmlNode<'a>>,
     pub attributes: Vec<Attribute<'a>>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -74,6 +79,7 @@ pub struct Finance<'a> {
     pub balances: Vec<TextElement<'a>>,
     pub extensions: Vec<XmlNode<'a>>,
     pub attributes: Vec<Attribute<'a>>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -84,6 +90,7 @@ pub struct Customer<'a> {
     pub comments: Option<TextElement<'a>>,
     pub extensions: Vec<XmlNode<'a>>,
     pub attributes: Vec<Attribute<'a>>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -93,6 +100,7 @@ pub struct Timeframe<'a> {
     pub latest_date: Option<TextElement<'a>>,
     pub extensions: Vec<XmlNode<'a>>,
     pub attributes: Vec<Attribute<'a>>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -103,6 +111,7 @@ pub struct Vendor<'a> {
     pub contacts: Vec<Contact<'a>>,
     pub extensions: Vec<XmlNode<'a>>,
     pub attributes: Vec<Attribute<'a>>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -116,6 +125,7 @@ pub struct Provider<'a> {
     pub contacts: Vec<Contact<'a>>,
     pub extensions: Vec<XmlNode<'a>>,
     pub attributes: Vec<Attribute<'a>>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -127,6 +137,7 @@ pub struct Contact<'a> {
     pub addresses: Vec<Address<'a>>,
     pub extensions: Vec<XmlNode<'a>>,
     pub attributes: Vec<Attribute<'a>>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -140,6 +151,7 @@ pub struct Address<'a> {
     pub country: Option<TextElement<'a>>,
     pub extensions: Vec<XmlNode<'a>>,
     pub attributes: Vec<Attribute<'a>>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -148,6 +160,7 @@ pub struct Id<'a> {
     pub source: Option<Cow<'a, str>>,
     pub parts: Vec<TextPart<'a>>,
     pub attributes: Vec<Attribute<'a>>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -159,6 +172,7 @@ pub struct Price<'a> {
     pub source: Option<Cow<'a, str>>,
     pub parts: Vec<TextPart<'a>>,
     pub attributes: Vec<Attribute<'a>>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -167,12 +181,14 @@ pub struct Name<'a> {
     pub name_type: Option<Cow<'a, str>>,
     pub parts: Vec<TextPart<'a>>,
     pub attributes: Vec<Attribute<'a>>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TextElement<'a> {
     pub parts: Vec<TextPart<'a>>,
     pub attributes: Vec<Attribute<'a>>,
+    pub span: Span,
 }
 
 impl<'a> TextElement<'a> {
@@ -180,11 +196,16 @@ impl<'a> TextElement<'a> {
         Self {
             parts: vec![TextPart::Text(value)],
             attributes,
+            span: Span::default(),
         }
     }
 
     pub fn from_parts(parts: Vec<TextPart<'a>>, attributes: Vec<Attribute<'a>>) -> Self {
-        Self { parts, attributes }
+        Self {
+            parts,
+            attributes,
+            span: Span::default(),
+        }
     }
 }
 

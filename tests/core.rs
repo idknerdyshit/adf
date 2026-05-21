@@ -498,6 +498,67 @@ fn pricecomment_singular_survives_as_extension() {
 }
 
 #[test]
+fn validation_issues_carry_byte_spans_into_original_input() {
+    let input = r#"<adf>
+  <prospect status="weird">
+    <vehicle interest="loan">
+      <year>2024</year>
+      <make>X</make>
+      <model>Y</model>
+      <price type="bizarre" currency="usd">1</price>
+    </vehicle>
+    <customer><contact /></customer>
+  </prospect>
+</adf>"#;
+
+    let doc = parse(input).expect("valid ADF should parse");
+    let report = doc.validate();
+
+    let prospect_status = report
+        .issues
+        .iter()
+        .find(|issue| issue.path.ends_with("prospect[0]@status"))
+        .expect("status enum issue");
+    let span = prospect_status.span.expect("prospect should have span");
+    assert!(input[span.start..span.end].starts_with("<prospect status=\"weird\""));
+    assert!(input[span.start..span.end].ends_with("</prospect>"));
+
+    let currency = report
+        .issues
+        .iter()
+        .find(|issue| issue.path.ends_with("price[0]@currency"))
+        .expect("currency issue");
+    let span = currency.span.expect("price should have span");
+    assert_eq!(
+        &input[span.start..span.end],
+        r#"<price type="bizarre" currency="usd">1</price>"#
+    );
+
+    let missing_name = report
+        .issues
+        .iter()
+        .find(|issue| issue.message.contains("missing name"))
+        .expect("missing-name issue");
+    let span = missing_name.span.expect("contact should have span");
+    assert_eq!(&input[span.start..span.end], "<contact />");
+}
+
+#[test]
+fn empty_adf_issue_span_covers_root_element() {
+    let input = "<adf></adf>";
+    let doc = parse(input).expect("valid ADF should parse");
+    let report = doc.validate();
+
+    let issue = report
+        .issues
+        .iter()
+        .find(|issue| issue.message.contains("at least one prospect"))
+        .expect("empty-adf issue");
+    let span = issue.span.expect("adf root should have span");
+    assert_eq!(&input[span.start..span.end], "<adf></adf>");
+}
+
+#[test]
 fn parser_borrows_element_names_for_ascii_input() {
     let input = r#"<adf><prospect><vehicle><year>2024</year></vehicle></prospect></adf>"#;
     let doc = parse(input).expect("valid ADF should parse");

@@ -373,7 +373,10 @@ fn decode_character_reference(entity: Cow<'_, str>, position: u64) -> Result<Cow
 }
 
 fn adf_from_root<'a>(root: &XmlElement<'a>) -> (Adf<'a>, Vec<Range<usize>>) {
-    let mut adf = Adf::default();
+    let mut adf = Adf {
+        span: root.span,
+        ..Default::default()
+    };
     let mut prospect_spans = Vec::new();
     if root.name.as_ref() != "adf" {
         adf.extensions.push(XmlNode::Element(root.clone()));
@@ -396,6 +399,7 @@ fn prospect_from_element<'a>(element: &XmlElement<'a>) -> Prospect<'a> {
     let mut prospect = Prospect {
         status: attr(element, "status"),
         attributes: element.attributes.clone(),
+        span: element.span,
         ..Default::default()
     };
 
@@ -419,6 +423,7 @@ fn vehicle_from_element<'a>(element: &XmlElement<'a>) -> Vehicle<'a> {
         interest: attr(element, "interest"),
         status: attr(element, "status"),
         attributes: element.attributes.clone(),
+        span: element.span,
         ..Default::default()
     };
 
@@ -455,6 +460,7 @@ fn vehicle_from_element<'a>(element: &XmlElement<'a>) -> Vehicle<'a> {
 fn color_combination_from_element<'a>(element: &XmlElement<'a>) -> ColorCombination<'a> {
     let mut colors = ColorCombination {
         attributes: element.attributes.clone(),
+        span: element.span,
         ..Default::default()
     };
     for child in element_children(element) {
@@ -471,6 +477,7 @@ fn color_combination_from_element<'a>(element: &XmlElement<'a>) -> ColorCombinat
 fn option_from_element<'a>(element: &XmlElement<'a>) -> VehicleOption<'a> {
     let mut option = VehicleOption {
         attributes: element.attributes.clone(),
+        span: element.span,
         ..Default::default()
     };
     for child in element_children(element) {
@@ -489,6 +496,7 @@ fn option_from_element<'a>(element: &XmlElement<'a>) -> VehicleOption<'a> {
 fn finance_from_element<'a>(element: &XmlElement<'a>) -> Finance<'a> {
     let mut finance = Finance {
         attributes: element.attributes.clone(),
+        span: element.span,
         ..Default::default()
     };
     for child in element_children(element) {
@@ -505,6 +513,7 @@ fn finance_from_element<'a>(element: &XmlElement<'a>) -> Finance<'a> {
 fn customer_from_element<'a>(element: &XmlElement<'a>) -> Customer<'a> {
     let mut customer = Customer {
         attributes: element.attributes.clone(),
+        span: element.span,
         ..Default::default()
     };
     for child in element_children(element) {
@@ -522,6 +531,7 @@ fn customer_from_element<'a>(element: &XmlElement<'a>) -> Customer<'a> {
 fn timeframe_from_element<'a>(element: &XmlElement<'a>) -> Timeframe<'a> {
     let mut timeframe = Timeframe {
         attributes: element.attributes.clone(),
+        span: element.span,
         ..Default::default()
     };
     for child in element_children(element) {
@@ -538,6 +548,7 @@ fn timeframe_from_element<'a>(element: &XmlElement<'a>) -> Timeframe<'a> {
 fn vendor_from_element<'a>(element: &XmlElement<'a>) -> Vendor<'a> {
     let mut vendor = Vendor {
         attributes: element.attributes.clone(),
+        span: element.span,
         ..Default::default()
     };
     for child in element_children(element) {
@@ -555,6 +566,7 @@ fn vendor_from_element<'a>(element: &XmlElement<'a>) -> Vendor<'a> {
 fn provider_from_element<'a>(element: &XmlElement<'a>) -> Provider<'a> {
     let mut provider = Provider {
         attributes: element.attributes.clone(),
+        span: element.span,
         ..Default::default()
     };
     for child in element_children(element) {
@@ -576,6 +588,7 @@ fn contact_from_element<'a>(element: &XmlElement<'a>) -> Contact<'a> {
     let mut contact = Contact {
         primary_contact: attr(element, "primarycontact"),
         attributes: element.attributes.clone(),
+        span: element.span,
         ..Default::default()
     };
     for child in element_children(element) {
@@ -594,6 +607,7 @@ fn address_from_element<'a>(element: &XmlElement<'a>) -> Address<'a> {
     let mut address = Address {
         address_type: attr(element, "type"),
         attributes: element.attributes.clone(),
+        span: element.span,
         ..Default::default()
     };
     for child in element_children(element) {
@@ -616,6 +630,7 @@ fn id_from_element<'a>(element: &XmlElement<'a>) -> Id<'a> {
         source: attr(element, "source"),
         parts: text_parts(element),
         attributes: element.attributes.clone(),
+        span: element.span,
     }
 }
 
@@ -628,6 +643,7 @@ fn price_from_element<'a>(element: &XmlElement<'a>) -> Price<'a> {
         source: attr(element, "source"),
         parts: text_parts(element),
         attributes: element.attributes.clone(),
+        span: element.span,
     }
 }
 
@@ -637,11 +653,16 @@ fn name_from_element<'a>(element: &XmlElement<'a>) -> Name<'a> {
         name_type: attr(element, "type"),
         parts: text_parts(element),
         attributes: element.attributes.clone(),
+        span: element.span,
     }
 }
 
 fn text_from_element<'a>(element: &XmlElement<'a>) -> TextElement<'a> {
-    TextElement::from_parts(text_parts(element), element.attributes.clone())
+    TextElement {
+        parts: text_parts(element),
+        attributes: element.attributes.clone(),
+        span: element.span,
+    }
 }
 
 fn text_parts<'a>(element: &XmlElement<'a>) -> Vec<TextPart<'a>> {
