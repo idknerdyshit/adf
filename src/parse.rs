@@ -7,13 +7,70 @@ use std::borrow::Cow;
 use std::ops::Range;
 use std::str;
 
+/// Default ceiling, in bytes, on the length of a `<!DOCTYPE …>` declaration's
+/// internal subset. Legitimate ADF documents rarely carry a DTD at all; the
+/// cap keeps entity-definition payloads bounded while leaving room for a small
+/// internal subset.
+pub const DEFAULT_MAX_DOCTYPE_LEN: usize = 4096;
+
+/// Options controlling how strictly [`parse_with`] treats the input.
+///
+/// The defaults preserve partner data (DOCTYPE declarations are kept, not
+/// rejected) while still bounding the size of any DTD internal subset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ParseOptions {
+    /// Reject any document that contains a `<!DOCTYPE …>` declaration.
+    pub reject_doctype: bool,
+    /// Maximum allowed length, in bytes, of a `<!DOCTYPE …>` declaration's
+    /// internal subset. `None` disables the limit. Ignored when
+    /// `reject_doctype` is set, since the declaration is rejected outright.
+    pub max_doctype_len: Option<usize>,
+}
+
+impl Default for ParseOptions {
+    fn default() -> Self {
+        Self {
+            reject_doctype: false,
+            max_doctype_len: Some(DEFAULT_MAX_DOCTYPE_LEN),
+        }
+    }
+}
+
+impl ParseOptions {
+    /// Reject any document that contains a `<!DOCTYPE …>` declaration.
+    #[must_use]
+    pub fn reject_doctype(mut self, reject: bool) -> Self {
+        self.reject_doctype = reject;
+        self
+    }
+
+    /// Cap the byte length of a `<!DOCTYPE …>` declaration's internal subset.
+    #[must_use]
+    pub fn max_doctype_len(mut self, limit: usize) -> Self {
+        self.max_doctype_len = Some(limit);
+        self
+    }
+
+    /// Remove the limit on `<!DOCTYPE …>` declaration length.
+    #[must_use]
+    pub fn without_doctype_limit(mut self) -> Self {
+        self.max_doctype_len = None;
+        self
+    }
+}
+
 pub(crate) fn parse(input: &str) -> Result<AdfDocument<'_>> {
-    let root = parse_tree(input)?;
+    parse_with(input, &ParseOptions::default())
+}
+
+pub(crate) fn parse_with<'a>(input: &'a str, options: &ParseOptions) -> Result<AdfDocument<'a>> {
+    let root = parse_tree(input, options)?;
     let (adf, prospect_spans) = adf_from_root(&root);
     Ok(AdfDocument::new(input, root, adf, prospect_spans))
 }
 
-fn parse_tree(input: &str) -> Result<XmlElement<'_>> {
+fn parse_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<XmlElement<'a>> {
     let mut reader = Reader::from_str(input);
     reader.config_mut().trim_text(false);
     let mut stack: Vec<XmlElement<'_>> = Vec::new();
@@ -109,16 +166,33 @@ fn parse_tree(input: &str) -> Result<XmlElement<'_>> {
                 )),
                 position,
             )?,
-            Event::DocType(doc_type) => append_node(
-                &mut stack,
-                root.is_some(),
-                XmlNode::DocType(
-                    doc_type
-                        .decode()
-                        .map_err(|source| Error::encoding(position, source))?,
-                ),
-                position,
-            )?,
+            Event::DocType(doc_type) => {
+                if options.reject_doctype {
+                    return Err(Error::DocTypeForbidden { position });
+                }
+                // Bound the raw byte length before decoding so an oversized
+                // declaration is rejected without paying for a full UTF-8 scan
+                // (or transcode) of the payload.
+                if let Some(limit) = options.max_doctype_len {
+                    let length = doc_type.len();
+                    if length > limit {
+                        return Err(Error::DocTypeTooLong {
+                            length,
+                            limit,
+                            position,
+                        });
+                    }
+                }
+                let decoded = doc_type
+                    .decode()
+                    .map_err(|source| Error::encoding(position, source))?;
+                append_node(
+                    &mut stack,
+                    root.is_some(),
+                    XmlNode::DocType(decoded),
+                    position,
+                )?;
+            }
             Event::GeneralRef(general_ref) => {
                 if stack.is_empty() {
                     return Err(Error::ContentOutsideRoot { position });

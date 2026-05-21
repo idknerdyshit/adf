@@ -36,6 +36,14 @@ pub enum Error {
         reference: String,
         position: u64,
     },
+    DocTypeForbidden {
+        position: u64,
+    },
+    DocTypeTooLong {
+        length: usize,
+        limit: usize,
+        position: u64,
+    },
     MissingRoot,
     MultipleRoots,
     Io(std::io::Error),
@@ -92,6 +100,17 @@ impl fmt::Display for Error {
                     "invalid XML character reference &{reference}; at byte {position}"
                 )
             }
+            Error::DocTypeForbidden { position } => {
+                write!(f, "DOCTYPE declaration is not allowed at byte {position}")
+            }
+            Error::DocTypeTooLong {
+                length,
+                limit,
+                position,
+            } => write!(
+                f,
+                "DOCTYPE declaration of {length} bytes exceeds the limit of {limit} bytes at byte {position}"
+            ),
             Error::MissingRoot => f.write_str("document does not contain a root element"),
             Error::MultipleRoots => f.write_str("document contains more than one root element"),
             Error::Io(source) => write!(f, "I/O error: {source}"),

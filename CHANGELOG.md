@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `parse_with` and `ParseOptions` for configuring parser hardening, plus the `DEFAULT_MAX_DOCTYPE_LEN` constant (4096 bytes).
+- `ParseOptions::reject_doctype` to reject any document containing a `<!DOCTYPE>` declaration, and `max_doctype_len` to bound the size of a DOCTYPE internal subset (checked on raw bytes before decoding).
+- Builder methods for ergonomic option construction: `ParseOptions::reject_doctype`, `max_doctype_len`, `without_doctype_limit`, and `ValidationOptions::strict`.
+
+### Changed
+
+- **Breaking:** `ValidationOptions` and `ParseOptions` are now `#[non_exhaustive]`. Construct them from `ValidationOptions::default()` / `ParseOptions::default()` and the builder methods rather than struct literals.
+- **Breaking:** `parse` now rejects `<!DOCTYPE>` declarations whose internal subset exceeds `DEFAULT_MAX_DOCTYPE_LEN` (4096 bytes) by default. Use `ParseOptions::max_doctype_len` or `without_doctype_limit` to change this.
+
+### Security
+
+- Documented and regression-tested that the parser never resolves external entities and never expands custom (DTD-defined) entities, leaving classic XXE and entity-expansion ("billion laughs") attacks structurally impossible.
+- Default DOCTYPE size cap bounds the cost of processing an untrusted DTD internal subset.
+
 ## [0.1.0] - 2026-05-17
 
 ### Added
@@ -16,8 +34,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Extension preservation for unknown XML elements and attributes.
 - ADF-specific structural validation report.
 - Regression coverage for entity decoding, root content handling, extension preservation, and dirty prospect rewriting.
-
-## [Unreleased]
 
 ## [0.2.0] - 2026-05-17
 

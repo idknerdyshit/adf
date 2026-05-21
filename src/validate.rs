@@ -30,8 +30,18 @@ impl ValidationReport<'_> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct ValidationOptions {
     pub strict: bool,
+}
+
+impl ValidationOptions {
+    /// Promote structural requirement checks from warnings to errors.
+    #[must_use]
+    pub fn strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
+    }
 }
 
 const PROSPECT_STATUS: &[&str] = &["new", "resend"];

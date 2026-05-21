@@ -1,4 +1,7 @@
-use adf::{Severity, TextPart, ValidationOptions, XmlNode, parse};
+use adf::{
+    DEFAULT_MAX_DOCTYPE_LEN, Error, ParseOptions, Severity, TextPart, ValidationOptions, XmlNode,
+    parse, parse_with,
+};
 use pretty_assertions::assert_eq;
 use std::borrow::Cow;
 
@@ -509,4 +512,101 @@ fn parser_borrows_element_names_for_ascii_input() {
         other => panic!("expected element, got {other:?}"),
     };
     assert!(matches!(vehicle.name, Cow::Borrowed(_)));
+}
+
+#[test]
+fn default_parse_preserves_small_doctype() {
+    let input = "<!DOCTYPE adf>\n<adf><prospect /></adf>";
+    let doc = parse(input).expect("a small DOCTYPE should be preserved by default");
+    assert!(matches!(
+        doc.root().name,
+        Cow::Borrowed("adf") | Cow::Owned(_)
+    ));
+    let out = doc.to_original_preserving_string().unwrap();
+    assert!(out.contains("<!DOCTYPE adf>"));
+}
+
+#[test]
+fn reject_doctype_option_errors_on_dtd() {
+    let input = "<!DOCTYPE adf>\n<adf><prospect /></adf>";
+    let options = ParseOptions::default().reject_doctype(true);
+    assert!(matches!(
+        parse_with(input, &options),
+        Err(Error::DocTypeForbidden { .. })
+    ));
+    // A document without a DOCTYPE still parses under the strict option.
+    assert!(parse_with("<adf><prospect /></adf>", &options).is_ok());
+}
+
+#[test]
+fn default_doctype_length_cap_rejects_entity_bomb() {
+    // A DTD internal subset large enough to exceed the default cap, e.g. a
+    // billion-laughs style entity definition block.
+    let bomb = format!(
+        "<!DOCTYPE adf [ {} ]>\n<adf><prospect /></adf>",
+        "<!ENTITY a \"aaaaaaaaaa\">".repeat(400)
+    );
+    assert!(bomb.len() > DEFAULT_MAX_DOCTYPE_LEN);
+    match parse(&bomb) {
+        Err(Error::DocTypeTooLong { length, limit, .. }) => {
+            assert_eq!(limit, DEFAULT_MAX_DOCTYPE_LEN);
+            assert!(length > limit);
+        }
+        other => panic!("expected DocTypeTooLong, got {other:?}"),
+    }
+}
+
+#[test]
+fn doctype_length_cap_is_configurable() {
+    let input = "<!DOCTYPE adf [ <!ENTITY x \"value\"> ]>\n<adf><prospect /></adf>";
+
+    // A tiny cap rejects an otherwise harmless internal subset.
+    let tight = ParseOptions::default().max_doctype_len(4);
+    assert!(matches!(
+        parse_with(input, &tight),
+        Err(Error::DocTypeTooLong { limit: 4, .. })
+    ));
+
+    // Disabling the cap accepts an arbitrarily large internal subset.
+    let unlimited = ParseOptions::default().without_doctype_limit();
+    let huge = format!(
+        "<!DOCTYPE adf [ {} ]>\n<adf><prospect /></adf>",
+        "<!ENTITY a \"aaaaaaaaaa\">".repeat(1000)
+    );
+    assert!(parse_with(&huge, &unlimited).is_ok());
+}
+
+#[test]
+fn custom_entities_are_never_expanded() {
+    // A declared custom entity must not be expanded; it survives verbatim as a
+    // reference, so recursive/exponential expansion is structurally impossible.
+    let input = concat!(
+        "<!DOCTYPE adf [ <!ENTITY lol \"ha\"> ]>\n",
+        "<adf><prospect><customer><contact>",
+        "<name>&lol;</name>",
+        "</contact></customer></prospect></adf>"
+    );
+    let doc = parse(input).expect("custom entity reference should parse without expansion");
+    let value = doc.adf().prospects[0].customer.as_ref().unwrap().contacts[0].names[0].value();
+    assert_eq!(value.as_ref(), "&lol;");
+    assert!(
+        doc.to_typed_string()
+            .unwrap()
+            .contains("<name>&lol;</name>")
+    );
+}
+
+#[test]
+fn external_entities_are_never_resolved() {
+    // A SYSTEM (external) entity reference must not be fetched or resolved; it
+    // is preserved as an unresolved reference (no XXE surface).
+    let input = concat!(
+        "<!DOCTYPE adf [ <!ENTITY xxe SYSTEM \"file:///etc/passwd\"> ]>\n",
+        "<adf><prospect><customer><contact>",
+        "<name>&xxe;</name>",
+        "</contact></customer></prospect></adf>"
+    );
+    let doc = parse(input).expect("external entity reference should parse without resolution");
+    let value = doc.adf().prospects[0].customer.as_ref().unwrap().contacts[0].names[0].value();
+    assert_eq!(value.as_ref(), "&xxe;");
 }
