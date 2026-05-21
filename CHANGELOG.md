@@ -7,8 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-20
+
 ### Added
 
+- Byte spans on every typed model node and on `ValidationIssue`, so a validation warning or error can be mapped back to its exact location in the original input. (db48dc6)
 - `parse_with` and `ParseOptions` for configuring parser hardening, plus the `DEFAULT_MAX_DOCTYPE_LEN` constant (4096 bytes).
 - `ParseOptions::reject_doctype` to reject any document containing a `<!DOCTYPE>` declaration, and `max_doctype_len` to bound the size of a DOCTYPE internal subset (checked on raw bytes before decoding).
 - Builder methods for ergonomic option construction: `ParseOptions::reject_doctype`, `max_doctype_len`, `without_doctype_limit`, and `ValidationOptions::strict`.
