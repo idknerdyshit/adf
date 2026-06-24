@@ -1,5 +1,7 @@
 use crate::document::Span;
-use crate::model::*;
+use crate::model::{
+    Adf, Contact, Customer, Finance, Price, Prospect, Provider, Timeframe, Vehicle, Vendor,
+};
 use crate::{Attribute, TextElement};
 use std::borrow::Cow;
 
@@ -46,42 +48,99 @@ impl ValidationOptions {
     }
 }
 
-const PROSPECT_STATUS: &[&str] = &["new", "resend"];
-const VEHICLE_INTEREST: &[&str] = &["buy", "lease", "sell", "trade-in", "test-drive"];
-const VEHICLE_STATUS: &[&str] = &["new", "used"];
-const PRICE_TYPE: &[&str] = &[
-    "quote",
-    "offer",
-    "msrp",
-    "invoice",
-    "call",
-    "appraisal",
-    "asking",
-];
-const PRICE_DELTA: &[&str] = &["absolute", "relative", "percentage"];
-const PRICE_RELATIVE_TO: &[&str] = &["msrp", "invoice"];
-const NAME_PART: &[&str] = &["surname", "first", "middle", "last", "full"];
-const NAME_TYPE: &[&str] = &["business", "individual"];
-const BOOL_FLAG: &[&str] = &["0", "1"];
-const PHONE_TYPE: &[&str] = &["voice", "fax", "cellphone", "pager"];
-const PHONE_TIME: &[&str] = &["morning", "afternoon", "evening", "nopreference", "day"];
-const ADDRESS_TYPE: &[&str] = &["work", "home", "delivery"];
-const ODOMETER_STATUS: &[&str] = &["unknown", "rolledover", "replaced", "original"];
-const ODOMETER_UNITS: &[&str] = &["km", "mi"];
+#[derive(Debug, Clone, Copy)]
+struct AllowedValues {
+    values: &'static [&'static str],
+    display: &'static str,
+}
+
+const PROSPECT_STATUS: AllowedValues = AllowedValues {
+    values: &["new", "resend"],
+    display: "new, resend",
+};
+const VEHICLE_INTEREST: AllowedValues = AllowedValues {
+    values: &["buy", "lease", "sell", "trade-in", "test-drive"],
+    display: "buy, lease, sell, trade-in, test-drive",
+};
+const VEHICLE_STATUS: AllowedValues = AllowedValues {
+    values: &["new", "used"],
+    display: "new, used",
+};
+const PRICE_TYPE: AllowedValues = AllowedValues {
+    values: &[
+        "quote",
+        "offer",
+        "msrp",
+        "invoice",
+        "call",
+        "appraisal",
+        "asking",
+    ],
+    display: "quote, offer, msrp, invoice, call, appraisal, asking",
+};
+const PRICE_DELTA: AllowedValues = AllowedValues {
+    values: &["absolute", "relative", "percentage"],
+    display: "absolute, relative, percentage",
+};
+const PRICE_RELATIVE_TO: AllowedValues = AllowedValues {
+    values: &["msrp", "invoice"],
+    display: "msrp, invoice",
+};
+const NAME_PART: AllowedValues = AllowedValues {
+    values: &["surname", "first", "middle", "last", "full"],
+    display: "surname, first, middle, last, full",
+};
+const NAME_TYPE: AllowedValues = AllowedValues {
+    values: &["business", "individual"],
+    display: "business, individual",
+};
+const BOOL_FLAG: AllowedValues = AllowedValues {
+    values: &["0", "1"],
+    display: "0, 1",
+};
+const PHONE_TYPE: AllowedValues = AllowedValues {
+    values: &["voice", "fax", "cellphone", "pager"],
+    display: "voice, fax, cellphone, pager",
+};
+const PHONE_TIME: AllowedValues = AllowedValues {
+    values: &["morning", "afternoon", "evening", "nopreference", "day"],
+    display: "morning, afternoon, evening, nopreference, day",
+};
+const ADDRESS_TYPE: AllowedValues = AllowedValues {
+    values: &["work", "home", "delivery"],
+    display: "work, home, delivery",
+};
+const ODOMETER_STATUS: AllowedValues = AllowedValues {
+    values: &["unknown", "rolledover", "replaced", "original"],
+    display: "unknown, rolledover, replaced, original",
+};
+const ODOMETER_UNITS: AllowedValues = AllowedValues {
+    values: &["km", "mi"],
+    display: "km, mi",
+};
 const CONDITION_VALUES: &[&str] = &["excellent", "good", "fair", "poor", "unknown"];
 const FINANCE_METHOD: &[&str] = &["cash", "finance", "lease"];
-const AMOUNT_TYPE: &[&str] = &[
-    "downpayment",
-    "tradein",
-    "rebate",
-    "total",
-    "monthly",
-    "fee",
-    "tax",
-    "other",
-];
-const AMOUNT_LIMIT: &[&str] = &["minimum", "maximum", "exact"];
-const BALANCE_TYPE: &[&str] = &["finance", "residual", "payoff", "other"];
+const AMOUNT_TYPE: AllowedValues = AllowedValues {
+    values: &[
+        "downpayment",
+        "tradein",
+        "rebate",
+        "total",
+        "monthly",
+        "fee",
+        "tax",
+        "other",
+    ],
+    display: "downpayment, tradein, rebate, total, monthly, fee, tax, other",
+};
+const AMOUNT_LIMIT: AllowedValues = AllowedValues {
+    values: &["minimum", "maximum", "exact"],
+    display: "minimum, maximum, exact",
+};
+const BALANCE_TYPE: AllowedValues = AllowedValues {
+    values: &["finance", "residual", "payoff", "other"],
+    display: "finance, residual, payoff, other",
+};
 
 pub fn validate<'a>(adf: &Adf<'a>) -> ValidationReport<'a> {
     validate_with(adf, ValidationOptions::default())
@@ -143,7 +202,7 @@ fn validate_prospect(
 
     check_enum(
         report,
-        format!("{path}@status"),
+        || format!("{path}@status"),
         prospect.span,
         prospect.status.as_deref(),
         PROSPECT_STATUS,
@@ -152,7 +211,7 @@ fn validate_prospect(
     if let Some(date) = &prospect.request_date {
         check_iso_datetime(
             report,
-            format!("{path}.requestdate"),
+            || format!("{path}.requestdate"),
             date.span,
             &date.value(),
         );
@@ -210,7 +269,7 @@ fn validate_timeframe(
     if let Some(date) = &timeframe.earliest_date {
         check_iso_datetime(
             report,
-            format!("{customer_path}.timeframe.earliestdate"),
+            || format!("{customer_path}.timeframe.earliestdate"),
             date.span,
             &date.value(),
         );
@@ -218,7 +277,7 @@ fn validate_timeframe(
     if let Some(date) = &timeframe.latest_date {
         check_iso_datetime(
             report,
-            format!("{customer_path}.timeframe.latestdate"),
+            || format!("{customer_path}.timeframe.latestdate"),
             date.span,
             &date.value(),
         );
@@ -261,14 +320,14 @@ fn validate_provider(
     if let Some(name) = &provider.name {
         check_enum(
             report,
-            format!("{provider_path}.name@part"),
+            || format!("{provider_path}.name@part"),
             name.span,
             name.part.as_deref(),
             NAME_PART,
         );
         check_enum(
             report,
-            format!("{provider_path}.name@type"),
+            || format!("{provider_path}.name@type"),
             name.span,
             name.name_type.as_deref(),
             NAME_TYPE,
@@ -300,7 +359,7 @@ fn validate_contact(
 
     check_enum(
         report,
-        format!("{path}@primarycontact"),
+        || format!("{path}@primarycontact"),
         contact.span,
         contact.primary_contact.as_deref(),
         BOOL_FLAG,
@@ -309,14 +368,14 @@ fn validate_contact(
     for (index, name) in contact.names.iter().enumerate() {
         check_enum(
             report,
-            format!("{path}.name[{index}]@part"),
+            || format!("{path}.name[{index}]@part"),
             name.span,
             name.part.as_deref(),
             NAME_PART,
         );
         check_enum(
             report,
-            format!("{path}.name[{index}]@type"),
+            || format!("{path}.name[{index}]@type"),
             name.span,
             name.name_type.as_deref(),
             NAME_TYPE,
@@ -327,7 +386,7 @@ fn validate_contact(
         let preferred = attr_value(&email.attributes, "preferredcontact");
         check_enum(
             report,
-            format!("{path}.email[{index}]@preferredcontact"),
+            || format!("{path}.email[{index}]@preferredcontact"),
             email.span,
             preferred,
             BOOL_FLAG,
@@ -338,21 +397,21 @@ fn validate_contact(
         let phone_path = format!("{path}.phone[{index}]");
         check_enum(
             report,
-            format!("{phone_path}@type"),
+            || format!("{phone_path}@type"),
             phone.span,
             attr_value(&phone.attributes, "type"),
             PHONE_TYPE,
         );
         check_enum(
             report,
-            format!("{phone_path}@time"),
+            || format!("{phone_path}@time"),
             phone.span,
             attr_value(&phone.attributes, "time"),
             PHONE_TIME,
         );
         check_enum(
             report,
-            format!("{phone_path}@preferredcontact"),
+            || format!("{phone_path}@preferredcontact"),
             phone.span,
             attr_value(&phone.attributes, "preferredcontact"),
             BOOL_FLAG,
@@ -363,7 +422,7 @@ fn validate_contact(
         let address_path = format!("{path}.address[{index}]");
         check_enum(
             report,
-            format!("{address_path}@type"),
+            || format!("{address_path}@type"),
             address.span,
             address.address_type.as_deref(),
             ADDRESS_TYPE,
@@ -371,7 +430,7 @@ fn validate_contact(
         if let Some(country) = &address.country {
             check_iso_country(
                 report,
-                format!("{address_path}.country"),
+                || format!("{address_path}.country"),
                 country.span,
                 &country.value(),
             );
@@ -409,14 +468,14 @@ fn validate_vehicle(
 
     check_enum(
         report,
-        format!("{path}@interest"),
+        || format!("{path}@interest"),
         vehicle.span,
         vehicle.interest.as_deref(),
         VEHICLE_INTEREST,
     );
     check_enum(
         report,
-        format!("{path}@status"),
+        || format!("{path}@status"),
         vehicle.span,
         vehicle.status.as_deref(),
         VEHICLE_STATUS,
@@ -425,14 +484,14 @@ fn validate_vehicle(
     if let Some(odometer) = &vehicle.odometer {
         check_enum(
             report,
-            format!("{path}.odometer@status"),
+            || format!("{path}.odometer@status"),
             odometer.span,
             attr_value(&odometer.attributes, "status"),
             ODOMETER_STATUS,
         );
         check_enum(
             report,
-            format!("{path}.odometer@units"),
+            || format!("{path}.odometer@units"),
             odometer.span,
             attr_value(&odometer.attributes, "units"),
             ODOMETER_UNITS,
@@ -473,27 +532,27 @@ fn validate_vehicle(
 fn validate_price(report: &mut ValidationReport<'_>, path: &str, price: &Price<'_>) {
     check_enum(
         report,
-        format!("{path}@type"),
+        || format!("{path}@type"),
         price.span,
         price.price_type.as_deref(),
         PRICE_TYPE,
     );
     check_enum(
         report,
-        format!("{path}@delta"),
+        || format!("{path}@delta"),
         price.span,
         price.delta.as_deref(),
         PRICE_DELTA,
     );
     check_enum(
         report,
-        format!("{path}@relativeto"),
+        || format!("{path}@relativeto"),
         price.span,
         price.relative_to.as_deref(),
         PRICE_RELATIVE_TO,
     );
     if let Some(currency) = price.currency.as_deref() {
-        check_iso_currency(report, format!("{path}@currency"), price.span, currency);
+        check_iso_currency(report, || format!("{path}@currency"), price.span, currency);
     }
 }
 
@@ -515,7 +574,7 @@ fn validate_finance(report: &mut ValidationReport<'_>, path: &str, finance: &Fin
         validate_amount(report, &amount_path, amount, AMOUNT_TYPE);
         check_enum(
             report,
-            format!("{amount_path}@limit"),
+            || format!("{amount_path}@limit"),
             amount.span,
             attr_value(&amount.attributes, "limit"),
             AMOUNT_LIMIT,
@@ -532,17 +591,17 @@ fn validate_amount(
     report: &mut ValidationReport<'_>,
     path: &str,
     amount: &TextElement<'_>,
-    type_values: &[&str],
+    type_values: AllowedValues,
 ) {
     check_enum(
         report,
-        format!("{path}@type"),
+        || format!("{path}@type"),
         amount.span,
         attr_value(&amount.attributes, "type"),
         type_values,
     );
     if let Some(currency) = attr_value(&amount.attributes, "currency") {
-        check_iso_currency(report, format!("{path}@currency"), amount.span, currency);
+        check_iso_currency(report, || format!("{path}@currency"), amount.span, currency);
     }
 }
 
@@ -555,35 +614,44 @@ fn attr_value<'a>(attributes: &'a [Attribute<'a>], name: &str) -> Option<&'a str
 
 fn check_enum(
     report: &mut ValidationReport<'_>,
-    path: String,
+    path: impl FnOnce() -> String,
     span: Span,
     value: Option<&str>,
-    allowed: &[&str],
+    allowed: AllowedValues,
 ) {
     let Some(value) = value else { return };
-    if allowed.contains(&value) {
+    if allowed.values.contains(&value) {
         return;
     }
-    let allowed_display = allowed.join(", ");
     report.warn(
-        path,
+        path(),
         span,
-        format!("value {value:?} is not one of: {allowed_display}"),
+        format!("value {value:?} is not one of: {}", allowed.display),
     );
 }
 
-fn check_iso_currency(report: &mut ValidationReport<'_>, path: String, span: Span, value: &str) {
+fn check_iso_currency(
+    report: &mut ValidationReport<'_>,
+    path: impl FnOnce() -> String,
+    span: Span,
+    value: &str,
+) {
     if value.len() == 3 && value.chars().all(|ch| ch.is_ascii_uppercase()) {
         return;
     }
     report.warn(
-        path,
+        path(),
         span,
         format!("currency {value:?} is not a 3-letter ISO 4217 code"),
     );
 }
 
-fn check_iso_country(report: &mut ValidationReport<'_>, path: String, span: Span, value: &str) {
+fn check_iso_country(
+    report: &mut ValidationReport<'_>,
+    path: impl FnOnce() -> String,
+    span: Span,
+    value: &str,
+) {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return;
@@ -592,13 +660,18 @@ fn check_iso_country(report: &mut ValidationReport<'_>, path: String, span: Span
         return;
     }
     report.warn(
-        path,
+        path(),
         span,
         format!("country {trimmed:?} is not a 2-letter ISO 3166-1 alpha-2 code"),
     );
 }
 
-fn check_iso_datetime(report: &mut ValidationReport<'_>, path: String, span: Span, value: &str) {
+fn check_iso_datetime(
+    report: &mut ValidationReport<'_>,
+    path: impl FnOnce() -> String,
+    span: Span,
+    value: &str,
+) {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return;
@@ -607,7 +680,7 @@ fn check_iso_datetime(report: &mut ValidationReport<'_>, path: String, span: Spa
         return;
     }
     report.warn(
-        path,
+        path(),
         span,
         format!("date {trimmed:?} is not ISO 8601 datetime"),
     );

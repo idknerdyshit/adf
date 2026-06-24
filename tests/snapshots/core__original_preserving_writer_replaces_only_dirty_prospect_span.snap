@@ -1,0 +1,26 @@
+---
+source: tests/core.rs
+expression: output
+---
+<adf>
+  <!-- before first -->
+  
+<prospect>
+<requestdate>one</requestdate>
+<vehicle>
+<year>2024</year>
+<make>Honda</make>
+<model>Camry</model></vehicle>
+<customer>
+<contact>
+<name part="full">A</name>
+<email>a@example.com</email></contact></customer>
+<vendor>
+<vendorname>Dealer One</vendorname></vendor></prospect>
+  <!-- between -->
+  <prospect status="resend">
+    <requestdate>two</requestdate>
+    <vehicle><year>2025</year><make>Ford</make><model>F-150</model></vehicle>
+  </prospect>
+  <!-- after second -->
+</adf>

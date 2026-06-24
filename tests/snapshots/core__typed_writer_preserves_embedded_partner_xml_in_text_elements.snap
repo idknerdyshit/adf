@@ -1,0 +1,15 @@
+---
+source: tests/core.rs
+expression: output
+---
+<?xml version="1.0"?>
+<?adf version="1.0"?>
+<adf xmlns:p="urn:partner">
+<prospect>
+<customer>
+<contact>
+<name part="full">A</name>
+<email>a@example.com</email></contact>
+<comments>Jane 
+<p:token code="x">VIP</p:token> Co</comments></customer></prospect>
+</adf>

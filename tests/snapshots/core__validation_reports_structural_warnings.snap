@@ -1,0 +1,9 @@
+---
+source: tests/core.rs
+expression: "normalized_issues(input, &report)"
+---
+warning|adf.prospect[0]|prospect is missing requestdate|<prospect><customer><contact /></customer></prospect>
+warning|adf.prospect[0]|prospect is missing vehicle|<prospect><customer><contact /></customer></prospect>
+warning|adf.prospect[0]|prospect is missing vendor|<prospect><customer><contact /></customer></prospect>
+warning|adf.prospect[0].customer.contact[0]|contact is missing name|<contact />
+warning|adf.prospect[0].customer.contact[0]|contact should contain email or phone|<contact />

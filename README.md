@@ -18,7 +18,7 @@ This crate is aimed at low-overhead ADF processing:
 
 ```toml
 [dependencies]
-adf = "0.2"
+adf = "0.3"
 ```
 
 ## Example
@@ -44,10 +44,10 @@ fn main() -> Result<(), adf::Error> {
 
     doc.prospect_mut(0)
         .unwrap()
-        .status = Some(Cow::Borrowed("contacted"));
+        .status = Some(Cow::Borrowed("resend"));
 
     let output = doc.to_original_preserving_string()?;
-    assert!(output.contains(r#"<prospect status="contacted">"#));
+    assert!(output.contains(r#"<prospect status="resend">"#));
 
     Ok(())
 }
@@ -58,6 +58,8 @@ fn main() -> Result<(), adf::Error> {
 `AdfDocument::to_original_preserving_string()` preserves the original XML when the document is clean. If a single prospect is modified through `prospect_mut`, only that prospect's original byte span is rewritten and the surrounding XML is copied through unchanged.
 
 `AdfDocument::to_typed_string()` writes normalized ADF XML from the typed model. This is useful when broad structural edits are made through `adf_mut`, or when normalized output is preferred over preserving original formatting.
+
+`AdfDocument::root()` exposes the raw XML tree for callers that need it. The tree is parsed lazily on first access so typed-only processing does not retain both the full raw tree and the typed ADF model.
 
 ## Parsing Safety
 

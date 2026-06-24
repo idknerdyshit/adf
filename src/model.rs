@@ -5,6 +5,7 @@ use std::borrow::Cow;
 pub struct Adf<'a> {
     pub prospects: Vec<Prospect<'a>>,
     pub extensions: Vec<XmlNode<'a>>,
+    pub attributes: Vec<Attribute<'a>>,
     pub span: Span,
 }
 
@@ -233,6 +234,7 @@ pub enum TextPart<'a> {
     Text(Cow<'a, str>),
     CData(Cow<'a, str>),
     EntityRef(Cow<'a, str>),
+    Node(XmlNode<'a>),
 }
 
 fn text_parts_value<'a>(parts: &[TextPart<'a>]) -> Cow<'a, str> {
@@ -243,6 +245,7 @@ fn text_parts_value<'a>(parts: &[TextPart<'a>]) -> Cow<'a, str> {
             Some(resolved) => Cow::Borrowed(resolved),
             None => Cow::Owned(format!("&{name};")),
         },
+        [TextPart::Node(_)] => Cow::Borrowed(""),
         _ => {
             let mut joined = String::new();
             for part in parts {
@@ -256,6 +259,7 @@ fn text_parts_value<'a>(parts: &[TextPart<'a>]) -> Cow<'a, str> {
                             joined.push(';');
                         }
                     },
+                    TextPart::Node(_) => {}
                 }
             }
             Cow::Owned(joined)

@@ -1,0 +1,10 @@
+---
+source: tests/core.rs
+expression: xml
+---
+<?xml version="1.0"?>
+<?adf version="1.0"?>
+<adf xmlns:p="urn:partner" p:batch="abc">
+<p:meta key="v">x</p:meta>
+<prospect></prospect>
+</adf>

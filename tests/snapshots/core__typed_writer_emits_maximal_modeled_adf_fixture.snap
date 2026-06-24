@@ -1,0 +1,78 @@
+---
+source: tests/core.rs
+expression: doc.to_typed_string().unwrap()
+---
+<?xml version="1.0"?>
+<?adf version="1.0"?>
+<adf xmlns:p="urn:partner" p:batch="42">
+<prospect status="new" partner="prospect">
+<id sequence="1" source="lead">P-1</id>
+<requestdate>2024-01-02T03:04:05-05:00</requestdate>
+<vehicle interest="buy" status="new" partner-id="v">
+<id sequence="2" source="vin">V-1</id>
+<year>2024</year>
+<make>Honda</make>
+<model>Civic</model>
+<vin>1HGCM82633A004352</vin>
+<stock>STK-1</stock>
+<trim>Touring</trim>
+<doors>4</doors>
+<bodystyle>Sedan</bodystyle>
+<transmission>Automatic</transmission>
+<odometer status="original" units="mi">123</odometer>
+<condition>excellent</condition>
+<colorcombination>
+<interiorcolor>Black</interiorcolor>
+<exteriorcolor>Blue</exteriorcolor>
+<preference>1</preference></colorcombination>
+<imagetag>https://example.test/car.jpg</imagetag>
+<price type="quote" currency="USD" delta="absolute" relativeto="msrp" source="dealer">25000</price>
+<pricecomments>Plus taxes</pricecomments>
+<option>
+<optionname>Sunroof</optionname>
+<manufacturercode>SUN</manufacturercode>
+<stock>in-stock</stock>
+<weighting>1</weighting>
+<price type="msrp" currency="USD">900</price></option>
+<finance>
+<method>finance</method>
+<amount type="downpayment" limit="minimum" currency="USD">1000</amount>
+<balance type="finance" currency="USD">24000</balance></finance>
+<comments>Vehicle comment</comments></vehicle>
+<customer>
+<contact primarycontact="1">
+<name part="full" type="individual">Jane Doe</name>
+<email preferredcontact="1">jane@example.test</email>
+<phone type="voice" time="day" preferredcontact="0">555-0100</phone>
+<address type="home">
+<street>1 Main</street>
+<street>Unit 2</street>
+<apartment>2A</apartment>
+<city>Detroit</city>
+<regioncode>MI</regioncode>
+<postalcode>48201</postalcode>
+<country>US</country></address></contact>
+<id sequence="3" source="crm">C-1</id>
+<timeframe>
+<description>soon</description>
+<earliestdate>2024-02-01</earliestdate>
+<latestdate>2024-03-01</latestdate></timeframe>
+<comments>Customer comment</comments></customer>
+<vendor>
+<id source="vendor">D-1</id>
+<vendorname>Dealer</vendorname>
+<url>https://dealer.example</url>
+<contact>
+<name part="full">Sales</name>
+<email>sales@example.test</email></contact></vendor>
+<provider>
+<id source="provider">PR-1</id>
+<name part="full" type="business">Provider</name>
+<service>Leads</service>
+<url>https://provider.example</url>
+<email>provider@example.test</email>
+<phone type="voice">555-0101</phone>
+<contact>
+<name part="full">Provider Contact</name>
+<email>pc@example.test</email></contact></provider></prospect>
+</adf>

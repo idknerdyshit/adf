@@ -1,0 +1,7 @@
+---
+source: tests/core.rs
+expression: "normalized_issues(input, &report)"
+---
+warning|adf.prospect[0].requestdate|date "not-a-date" is not ISO 8601 datetime|<requestdate>not-a-date</requestdate>
+warning|adf.prospect[0].customer.contact[0].address[0].country|country "USA" is not a 2-letter ISO 3166-1 alpha-2 code|<country>USA</country>
+warning|adf.prospect[0].vehicle[0].price[0]@currency|currency "usd" is not a 3-letter ISO 4217 code|<price type="quote" currency="usd">1</price>

@@ -1,0 +1,10 @@
+---
+source: tests/core.rs
+expression: xml
+---
+<?xml version="1.0"?>
+<?adf version="1.0"?>
+<adf>
+<partner-meta key="v">x</partner-meta>
+<prospect></prospect>
+</adf>

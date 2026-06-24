@@ -1,0 +1,13 @@
+---
+source: tests/core.rs
+expression: output
+---
+<adf>
+<prospect>
+<id sequence="1" source="changed" partner="p">123</id>
+<vehicle>
+<price type="quote" taxable="yes" currency="USD">10</price></vehicle>
+<customer>
+<contact>
+<name part="full" xml:lang="en">Jane</name>
+<email>a@example.com</email></contact></customer></prospect></adf>

@@ -1,0 +1,17 @@
+---
+source: tests/core.rs
+expression: output
+---
+<?xml version="1.0"?>
+<?adf version="1.0"?>
+<adf>
+<prospect xmlns:p="urn:partner">
+<vehicle interest="buy" partner-id="x">
+<year>2024</year>
+<make>Honda</make>
+<model>Civic</model></vehicle>
+<customer>
+<contact partner="y">
+<name part="full">A</name>
+<email>a@example.com</email></contact></customer></prospect>
+</adf>

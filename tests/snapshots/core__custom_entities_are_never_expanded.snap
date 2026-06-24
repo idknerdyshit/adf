@@ -1,0 +1,12 @@
+---
+source: tests/core.rs
+expression: doc.to_typed_string().unwrap()
+---
+<?xml version="1.0"?>
+<?adf version="1.0"?>
+<adf>
+<prospect>
+<customer>
+<contact>
+<name>&lol;</name></contact></customer></prospect>
+</adf>

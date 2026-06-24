@@ -1,0 +1,18 @@
+---
+source: tests/core.rs
+expression: typed
+---
+<?xml version="1.0"?>
+<?adf version="1.0"?>
+<adf>
+<prospect>
+<vehicle>
+<year>2024</year>
+<make>Honda</make>
+<model>Civic</model>
+<pricecomment>special offer</pricecomment></vehicle>
+<customer>
+<contact>
+<name part="full">A</name>
+<email>a@example.com</email></contact></customer></prospect>
+</adf>

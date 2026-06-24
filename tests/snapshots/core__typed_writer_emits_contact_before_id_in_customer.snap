@@ -1,0 +1,14 @@
+---
+source: tests/core.rs
+expression: output
+---
+<?xml version="1.0"?>
+<?adf version="1.0"?>
+<adf>
+<prospect>
+<customer>
+<contact>
+<name part="full">A</name>
+<email>a@example.com</email></contact>
+<id source="crm">99</id></customer></prospect>
+</adf>

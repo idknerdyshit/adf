@@ -1,6 +1,7 @@
 use crate::model::{Adf, Prospect};
-use crate::{Result, validate};
+use crate::{ParseOptions, Result, validate};
 use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::io::Write;
 use std::ops::Range;
 
@@ -39,7 +40,8 @@ pub enum XmlNode<'a> {
 #[derive(Debug, Clone)]
 pub struct AdfDocument<'a> {
     pub(crate) original: &'a str,
-    pub(crate) root: XmlElement<'a>,
+    pub(crate) parse_options: ParseOptions,
+    pub(crate) raw_root: OnceCell<XmlElement<'a>>,
     pub(crate) adf: Adf<'a>,
     pub(crate) prospect_spans: Vec<Range<usize>>,
     pub(crate) dirty_prospects: Vec<bool>,
@@ -49,14 +51,15 @@ pub struct AdfDocument<'a> {
 impl<'a> AdfDocument<'a> {
     pub(crate) fn new(
         original: &'a str,
-        root: XmlElement<'a>,
+        parse_options: ParseOptions,
         adf: Adf<'a>,
         prospect_spans: Vec<Range<usize>>,
     ) -> Self {
         let dirty_prospects = vec![false; prospect_spans.len()];
         Self {
             original,
-            root,
+            parse_options,
+            raw_root: OnceCell::new(),
             adf,
             prospect_spans,
             dirty_prospects,
@@ -68,8 +71,16 @@ impl<'a> AdfDocument<'a> {
         self.original
     }
 
+    /// Return the raw XML root, reparsing the original input on first access.
+    ///
+    /// The typed model is built eagerly by [`crate::parse`], but the full raw
+    /// tree is kept lazy so callers that only need typed ADF fields avoid
+    /// retaining two complete document representations.
     pub fn root(&self) -> &XmlElement<'a> {
-        &self.root
+        self.raw_root.get_or_init(|| {
+            crate::parse::parse_tree(self.original, &self.parse_options)
+                .expect("original input was already parsed successfully")
+        })
     }
 
     pub fn adf(&self) -> &Adf<'a> {

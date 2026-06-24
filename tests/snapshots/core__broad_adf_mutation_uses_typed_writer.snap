@@ -1,0 +1,33 @@
+---
+source: tests/core.rs
+expression: output
+---
+<?xml version="1.0"?>
+<?adf version="1.0"?>
+<adf>
+<prospect status="contacted">
+<id sequence="1" source="Cobalt">38889</id>
+<requestdate>2000-03-30T15:30:20-08:00</requestdate>
+<vehicle interest="buy" status="used">
+<year>1997</year>
+<make>Chevrolet</make>
+<model>Blazer</model>
+<vin>1GNDT13W5V2200000</vin>
+<price type="quote" currency="USD">26995</price>
+<option>
+<optionname>Sport</optionname>
+<manufacturercode>p394</manufacturercode></option>
+<partner-score value="hot">97</partner-score></vehicle>
+<customer>
+<contact primarycontact="1">
+<name part="first">John</name>
+<name part="last">Doe</name>
+<email preferredcontact="1">jdoe@example.com</email>
+<phone type="voice" time="morning">393-999-3922</phone></contact>
+<comments>Can deliver by Thursday?</comments></customer>
+<vendor>
+<vendorname>Koons Internet Outlet</vendorname></vendor>
+<provider>
+<name part="full">CarPoint</name>
+<service>Used Car Classifieds</service></provider></prospect>
+</adf>

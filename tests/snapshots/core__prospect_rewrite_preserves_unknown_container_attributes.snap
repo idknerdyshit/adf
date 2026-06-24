@@ -1,0 +1,17 @@
+---
+source: tests/core.rs
+expression: output
+---
+<adf>
+<prospect>
+<vehicle interest="buy" partner-id="x">
+<year>2024</year>
+<make>Honda</make>
+<model>Civic</model></vehicle>
+<customer>
+<contact partner="y" primarycontact="1">
+<name part="full">A</name>
+<email>a@example.com</email></contact></customer>
+<address-meta>
+<address type="home" partner="z">
+<street>1 Main</street></address></address-meta></prospect></adf>

@@ -1,6 +1,10 @@
 use crate::document::{AdfDocument, Attribute, Span, XmlElement, XmlNode};
 use crate::error::{Error, Result};
-use crate::model::*;
+use crate::model::{
+    Address, Adf, ColorCombination, Contact, Customer, Finance, Id, Name, Price, Prospect,
+    Provider, TextElement, TextPart, Timeframe, Vehicle, VehicleOption, Vendor,
+    resolve_standard_entity,
+};
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 use std::borrow::Cow;
@@ -66,11 +70,11 @@ pub(crate) fn parse(input: &str) -> Result<AdfDocument<'_>> {
 
 pub(crate) fn parse_with<'a>(input: &'a str, options: &ParseOptions) -> Result<AdfDocument<'a>> {
     let root = parse_tree(input, options)?;
-    let (adf, prospect_spans) = adf_from_root(&root);
-    Ok(AdfDocument::new(input, root, adf, prospect_spans))
+    let (adf, prospect_spans) = adf_from_root(root);
+    Ok(AdfDocument::new(input, *options, adf, prospect_spans))
 }
 
-fn parse_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<XmlElement<'a>> {
+pub(crate) fn parse_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<XmlElement<'a>> {
     let mut reader = Reader::from_str(input);
     reader.config_mut().trim_text(false);
     let mut stack: Vec<XmlElement<'_>> = Vec::new();
@@ -372,38 +376,56 @@ fn decode_character_reference(entity: Cow<'_, str>, position: u64) -> Result<Cow
     Ok(Cow::Owned(ch.to_string()))
 }
 
-fn adf_from_root<'a>(root: &XmlElement<'a>) -> (Adf<'a>, Vec<Range<usize>>) {
-    let mut adf = Adf {
-        span: root.span,
-        ..Default::default()
-    };
+fn adf_from_root<'a>(root: XmlElement<'a>) -> (Adf<'a>, Vec<Range<usize>>) {
     let mut prospect_spans = Vec::new();
     if root.name.as_ref() != "adf" {
-        adf.extensions.push(XmlNode::Element(root.clone()));
+        let mut adf = Adf {
+            span: root.span,
+            ..Default::default()
+        };
+        adf.extensions.push(XmlNode::Element(root));
         return (adf, prospect_spans);
     }
 
-    for child in element_children(root) {
+    let XmlElement {
+        attributes,
+        children,
+        span,
+        ..
+    } = root;
+    let mut adf = Adf {
+        attributes,
+        span,
+        ..Default::default()
+    };
+
+    for child in element_children(children) {
         match child.name.as_ref() {
             "prospect" => {
-                adf.prospects.push(prospect_from_element(child));
                 prospect_spans.push(child.span.start..child.span.end);
+                adf.prospects.push(prospect_from_element(child));
             }
-            _ => adf.extensions.push(XmlNode::Element(child.clone())),
+            _ => adf.extensions.push(XmlNode::Element(child)),
         }
     }
     (adf, prospect_spans)
 }
 
-fn prospect_from_element<'a>(element: &XmlElement<'a>) -> Prospect<'a> {
+fn prospect_from_element<'a>(element: XmlElement<'a>) -> Prospect<'a> {
+    let XmlElement {
+        attributes,
+        children,
+        span,
+        ..
+    } = element;
     let mut prospect = Prospect {
-        status: attr(element, "status"),
-        attributes: element.attributes.clone(),
-        span: element.span,
+        status: attr(&attributes, "status"),
+        attributes,
+        span,
         ..Default::default()
     };
 
-    for child in element_children(element) {
+    for child in element_children(children) {
         match child.name.as_ref() {
             "id" => prospect.ids.push(id_from_element(child)),
             "requestdate" => prospect.request_date = Some(text_from_element(child)),
@@ -411,23 +433,29 @@ fn prospect_from_element<'a>(element: &XmlElement<'a>) -> Prospect<'a> {
             "customer" => prospect.customer = Some(customer_from_element(child)),
             "vendor" => prospect.vendor = Some(vendor_from_element(child)),
             "provider" => prospect.provider = Some(provider_from_element(child)),
-            _ => prospect.extensions.push(XmlNode::Element(child.clone())),
+            _ => prospect.extensions.push(XmlNode::Element(child)),
         }
     }
 
     prospect
 }
 
-fn vehicle_from_element<'a>(element: &XmlElement<'a>) -> Vehicle<'a> {
+fn vehicle_from_element<'a>(element: XmlElement<'a>) -> Vehicle<'a> {
+    let XmlElement {
+        attributes,
+        children,
+        span,
+        ..
+    } = element;
     let mut vehicle = Vehicle {
-        interest: attr(element, "interest"),
-        status: attr(element, "status"),
-        attributes: element.attributes.clone(),
-        span: element.span,
+        interest: attr(&attributes, "interest"),
+        status: attr(&attributes, "status"),
+        attributes,
+        span,
         ..Default::default()
     };
 
-    for child in element_children(element) {
+    for child in element_children(children) {
         match child.name.as_ref() {
             "id" => vehicle.ids.push(id_from_element(child)),
             "year" => vehicle.year = Some(text_from_element(child)),
@@ -450,126 +478,168 @@ fn vehicle_from_element<'a>(element: &XmlElement<'a>) -> Vehicle<'a> {
             "option" => vehicle.options.push(option_from_element(child)),
             "finance" => vehicle.finance = Some(finance_from_element(child)),
             "comments" => vehicle.comments = Some(text_from_element(child)),
-            _ => vehicle.extensions.push(XmlNode::Element(child.clone())),
+            _ => vehicle.extensions.push(XmlNode::Element(child)),
         }
     }
 
     vehicle
 }
 
-fn color_combination_from_element<'a>(element: &XmlElement<'a>) -> ColorCombination<'a> {
+fn color_combination_from_element<'a>(element: XmlElement<'a>) -> ColorCombination<'a> {
+    let XmlElement {
+        attributes,
+        children,
+        span,
+        ..
+    } = element;
     let mut colors = ColorCombination {
-        attributes: element.attributes.clone(),
-        span: element.span,
+        attributes,
+        span,
         ..Default::default()
     };
-    for child in element_children(element) {
+    for child in element_children(children) {
         match child.name.as_ref() {
             "interiorcolor" => colors.interior_color = Some(text_from_element(child)),
             "exteriorcolor" => colors.exterior_color = Some(text_from_element(child)),
             "preference" => colors.preference = Some(text_from_element(child)),
-            _ => colors.extensions.push(XmlNode::Element(child.clone())),
+            _ => colors.extensions.push(XmlNode::Element(child)),
         }
     }
     colors
 }
 
-fn option_from_element<'a>(element: &XmlElement<'a>) -> VehicleOption<'a> {
+fn option_from_element<'a>(element: XmlElement<'a>) -> VehicleOption<'a> {
+    let XmlElement {
+        attributes,
+        children,
+        span,
+        ..
+    } = element;
     let mut option = VehicleOption {
-        attributes: element.attributes.clone(),
-        span: element.span,
+        attributes,
+        span,
         ..Default::default()
     };
-    for child in element_children(element) {
+    for child in element_children(children) {
         match child.name.as_ref() {
             "optionname" => option.option_name = Some(text_from_element(child)),
             "manufacturercode" => option.manufacturer_code = Some(text_from_element(child)),
             "stock" => option.stock = Some(text_from_element(child)),
             "weighting" => option.weighting = Some(text_from_element(child)),
             "price" => option.prices.push(price_from_element(child)),
-            _ => option.extensions.push(XmlNode::Element(child.clone())),
+            _ => option.extensions.push(XmlNode::Element(child)),
         }
     }
     option
 }
 
-fn finance_from_element<'a>(element: &XmlElement<'a>) -> Finance<'a> {
+fn finance_from_element<'a>(element: XmlElement<'a>) -> Finance<'a> {
+    let XmlElement {
+        attributes,
+        children,
+        span,
+        ..
+    } = element;
     let mut finance = Finance {
-        attributes: element.attributes.clone(),
-        span: element.span,
+        attributes,
+        span,
         ..Default::default()
     };
-    for child in element_children(element) {
+    for child in element_children(children) {
         match child.name.as_ref() {
             "method" => finance.method = Some(text_from_element(child)),
             "amount" => finance.amounts.push(text_from_element(child)),
             "balance" => finance.balances.push(text_from_element(child)),
-            _ => finance.extensions.push(XmlNode::Element(child.clone())),
+            _ => finance.extensions.push(XmlNode::Element(child)),
         }
     }
     finance
 }
 
-fn customer_from_element<'a>(element: &XmlElement<'a>) -> Customer<'a> {
+fn customer_from_element<'a>(element: XmlElement<'a>) -> Customer<'a> {
+    let XmlElement {
+        attributes,
+        children,
+        span,
+        ..
+    } = element;
     let mut customer = Customer {
-        attributes: element.attributes.clone(),
-        span: element.span,
+        attributes,
+        span,
         ..Default::default()
     };
-    for child in element_children(element) {
+    for child in element_children(children) {
         match child.name.as_ref() {
             "id" => customer.ids.push(id_from_element(child)),
             "contact" => customer.contacts.push(contact_from_element(child)),
             "timeframe" => customer.timeframe = Some(timeframe_from_element(child)),
             "comments" => customer.comments = Some(text_from_element(child)),
-            _ => customer.extensions.push(XmlNode::Element(child.clone())),
+            _ => customer.extensions.push(XmlNode::Element(child)),
         }
     }
     customer
 }
 
-fn timeframe_from_element<'a>(element: &XmlElement<'a>) -> Timeframe<'a> {
+fn timeframe_from_element<'a>(element: XmlElement<'a>) -> Timeframe<'a> {
+    let XmlElement {
+        attributes,
+        children,
+        span,
+        ..
+    } = element;
     let mut timeframe = Timeframe {
-        attributes: element.attributes.clone(),
-        span: element.span,
+        attributes,
+        span,
         ..Default::default()
     };
-    for child in element_children(element) {
+    for child in element_children(children) {
         match child.name.as_ref() {
             "description" => timeframe.description = Some(text_from_element(child)),
             "earliestdate" => timeframe.earliest_date = Some(text_from_element(child)),
             "latestdate" => timeframe.latest_date = Some(text_from_element(child)),
-            _ => timeframe.extensions.push(XmlNode::Element(child.clone())),
+            _ => timeframe.extensions.push(XmlNode::Element(child)),
         }
     }
     timeframe
 }
 
-fn vendor_from_element<'a>(element: &XmlElement<'a>) -> Vendor<'a> {
+fn vendor_from_element<'a>(element: XmlElement<'a>) -> Vendor<'a> {
+    let XmlElement {
+        attributes,
+        children,
+        span,
+        ..
+    } = element;
     let mut vendor = Vendor {
-        attributes: element.attributes.clone(),
-        span: element.span,
+        attributes,
+        span,
         ..Default::default()
     };
-    for child in element_children(element) {
+    for child in element_children(children) {
         match child.name.as_ref() {
             "id" => vendor.ids.push(id_from_element(child)),
             "vendorname" => vendor.vendor_name = Some(text_from_element(child)),
             "url" => vendor.url = Some(text_from_element(child)),
             "contact" => vendor.contacts.push(contact_from_element(child)),
-            _ => vendor.extensions.push(XmlNode::Element(child.clone())),
+            _ => vendor.extensions.push(XmlNode::Element(child)),
         }
     }
     vendor
 }
 
-fn provider_from_element<'a>(element: &XmlElement<'a>) -> Provider<'a> {
+fn provider_from_element<'a>(element: XmlElement<'a>) -> Provider<'a> {
+    let XmlElement {
+        attributes,
+        children,
+        span,
+        ..
+    } = element;
     let mut provider = Provider {
-        attributes: element.attributes.clone(),
-        span: element.span,
+        attributes,
+        span,
         ..Default::default()
     };
-    for child in element_children(element) {
+    for child in element_children(children) {
         match child.name.as_ref() {
             "id" => provider.ids.push(id_from_element(child)),
             "name" => provider.name = Some(name_from_element(child)),
@@ -578,39 +648,51 @@ fn provider_from_element<'a>(element: &XmlElement<'a>) -> Provider<'a> {
             "email" => provider.email = Some(text_from_element(child)),
             "phone" => provider.phone = Some(text_from_element(child)),
             "contact" => provider.contacts.push(contact_from_element(child)),
-            _ => provider.extensions.push(XmlNode::Element(child.clone())),
+            _ => provider.extensions.push(XmlNode::Element(child)),
         }
     }
     provider
 }
 
-fn contact_from_element<'a>(element: &XmlElement<'a>) -> Contact<'a> {
+fn contact_from_element<'a>(element: XmlElement<'a>) -> Contact<'a> {
+    let XmlElement {
+        attributes,
+        children,
+        span,
+        ..
+    } = element;
     let mut contact = Contact {
-        primary_contact: attr(element, "primarycontact"),
-        attributes: element.attributes.clone(),
-        span: element.span,
+        primary_contact: attr(&attributes, "primarycontact"),
+        attributes,
+        span,
         ..Default::default()
     };
-    for child in element_children(element) {
+    for child in element_children(children) {
         match child.name.as_ref() {
             "name" => contact.names.push(name_from_element(child)),
             "email" => contact.emails.push(text_from_element(child)),
             "phone" => contact.phones.push(text_from_element(child)),
             "address" => contact.addresses.push(address_from_element(child)),
-            _ => contact.extensions.push(XmlNode::Element(child.clone())),
+            _ => contact.extensions.push(XmlNode::Element(child)),
         }
     }
     contact
 }
 
-fn address_from_element<'a>(element: &XmlElement<'a>) -> Address<'a> {
+fn address_from_element<'a>(element: XmlElement<'a>) -> Address<'a> {
+    let XmlElement {
+        attributes,
+        children,
+        span,
+        ..
+    } = element;
     let mut address = Address {
-        address_type: attr(element, "type"),
-        attributes: element.attributes.clone(),
-        span: element.span,
+        address_type: attr(&attributes, "type"),
+        attributes,
+        span,
         ..Default::default()
     };
-    for child in element_children(element) {
+    for child in element_children(children) {
         match child.name.as_ref() {
             "street" => address.streets.push(text_from_element(child)),
             "apartment" => address.apartment = Some(text_from_element(child)),
@@ -618,78 +700,99 @@ fn address_from_element<'a>(element: &XmlElement<'a>) -> Address<'a> {
             "regioncode" => address.region_code = Some(text_from_element(child)),
             "postalcode" => address.postal_code = Some(text_from_element(child)),
             "country" => address.country = Some(text_from_element(child)),
-            _ => address.extensions.push(XmlNode::Element(child.clone())),
+            _ => address.extensions.push(XmlNode::Element(child)),
         }
     }
     address
 }
 
-fn id_from_element<'a>(element: &XmlElement<'a>) -> Id<'a> {
+fn id_from_element<'a>(element: XmlElement<'a>) -> Id<'a> {
+    let XmlElement {
+        attributes,
+        children,
+        span,
+        ..
+    } = element;
     Id {
-        sequence: attr(element, "sequence"),
-        source: attr(element, "source"),
-        parts: text_parts(element),
-        attributes: element.attributes.clone(),
-        span: element.span,
+        sequence: attr(&attributes, "sequence"),
+        source: attr(&attributes, "source"),
+        parts: text_parts(children),
+        attributes,
+        span,
     }
 }
 
-fn price_from_element<'a>(element: &XmlElement<'a>) -> Price<'a> {
+fn price_from_element<'a>(element: XmlElement<'a>) -> Price<'a> {
+    let XmlElement {
+        attributes,
+        children,
+        span,
+        ..
+    } = element;
     Price {
-        price_type: attr(element, "type"),
-        currency: attr(element, "currency"),
-        delta: attr(element, "delta"),
-        relative_to: attr(element, "relativeto"),
-        source: attr(element, "source"),
-        parts: text_parts(element),
-        attributes: element.attributes.clone(),
-        span: element.span,
+        price_type: attr(&attributes, "type"),
+        currency: attr(&attributes, "currency"),
+        delta: attr(&attributes, "delta"),
+        relative_to: attr(&attributes, "relativeto"),
+        source: attr(&attributes, "source"),
+        parts: text_parts(children),
+        attributes,
+        span,
     }
 }
 
-fn name_from_element<'a>(element: &XmlElement<'a>) -> Name<'a> {
+fn name_from_element<'a>(element: XmlElement<'a>) -> Name<'a> {
+    let XmlElement {
+        attributes,
+        children,
+        span,
+        ..
+    } = element;
     Name {
-        part: attr(element, "part"),
-        name_type: attr(element, "type"),
-        parts: text_parts(element),
-        attributes: element.attributes.clone(),
-        span: element.span,
+        part: attr(&attributes, "part"),
+        name_type: attr(&attributes, "type"),
+        parts: text_parts(children),
+        attributes,
+        span,
     }
 }
 
-fn text_from_element<'a>(element: &XmlElement<'a>) -> TextElement<'a> {
+fn text_from_element<'a>(element: XmlElement<'a>) -> TextElement<'a> {
+    let XmlElement {
+        attributes,
+        children,
+        span,
+        ..
+    } = element;
     TextElement {
-        parts: text_parts(element),
-        attributes: element.attributes.clone(),
-        span: element.span,
+        parts: text_parts(children),
+        attributes,
+        span,
     }
 }
 
-fn text_parts<'a>(element: &XmlElement<'a>) -> Vec<TextPart<'a>> {
+fn text_parts<'a>(children: Vec<XmlNode<'a>>) -> Vec<TextPart<'a>> {
     let mut parts = Vec::new();
-    for child in &element.children {
+    for child in children {
         match child {
-            XmlNode::Text(text) => parts.push(TextPart::Text(text.clone())),
-            XmlNode::CData(text) => parts.push(TextPart::CData(text.clone())),
-            XmlNode::EntityRef(name) => parts.push(TextPart::EntityRef(name.clone())),
-            _ => continue,
+            XmlNode::Text(text) => parts.push(TextPart::Text(text)),
+            XmlNode::CData(text) => parts.push(TextPart::CData(text)),
+            XmlNode::EntityRef(name) => parts.push(TextPart::EntityRef(name)),
+            node => parts.push(TextPart::Node(node)),
         }
     }
     parts
 }
 
-fn attr<'a>(element: &XmlElement<'a>, name: &str) -> Option<Cow<'a, str>> {
-    element
-        .attributes
+fn attr<'a>(attributes: &[Attribute<'a>], name: &str) -> Option<Cow<'a, str>> {
+    attributes
         .iter()
         .find(|attr| attr.name.as_ref() == name)
         .map(|attr| attr.value.clone())
 }
 
-fn element_children<'element, 'input>(
-    element: &'element XmlElement<'input>,
-) -> impl Iterator<Item = &'element XmlElement<'input>> {
-    element.children.iter().filter_map(|child| match child {
+fn element_children<'a>(children: Vec<XmlNode<'a>>) -> impl Iterator<Item = XmlElement<'a>> {
+    children.into_iter().filter_map(|child| match child {
         XmlNode::Element(element) => Some(element),
         _ => None,
     })
