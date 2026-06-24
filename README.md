@@ -18,7 +18,7 @@ This crate is aimed at low-overhead ADF processing:
 
 ```toml
 [dependencies]
-adf = "0.3"
+adf = "0.4"
 ```
 
 ## Example

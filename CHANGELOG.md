@@ -7,19 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-24
+
 ### Added
 
 - Root `<adf>` attributes now round-trip through the typed writer, preserving document-level namespace declarations required by vendor extensions.
 - Text-like ADF elements now retain embedded XML nodes in `TextPart::Node`, so partner markup inside fields such as `<comments>` is not dropped by normalized output.
+- Snapshot-based regression tests now pin exact writer output and validation reports.
+- `lefthook` pre-push configuration now runs formatting, linting, and tests before pushes.
+- Cargo lint configuration now enables higher-signal Rust and Clippy checks.
 
 ### Changed
 
+- **Breaking:** `Adf` now includes root `<adf>` attributes and `TextPart` has a `Node` variant for embedded XML, which affects struct literals and exhaustive enum matches.
 - `AdfDocument` now keeps the raw XML tree lazy; `root()` reparses the original input on first access instead of every parse retaining both raw and typed document representations.
 - Parser conversion now moves raw XML nodes into the typed model instead of cloning extension subtrees out of an eagerly retained raw tree.
 - Typed writing now avoids child sorting for extension-free containers, streams attributes without temporary vectors, and escapes text/attributes in chunks.
 - Validation enum checks now use precomputed allowed-value display strings and build issue paths only when a warning is emitted.
 - The typed writer now emits known ADF children in DTD order while keeping parsed extension elements near their original source positions.
 - README examples now target the current crate version and use a valid `prospect@status` value.
+
+### Fixed
+
+- Removed tracked macOS metadata from the crate package contents.
 
 ## [0.3.0] - 2026-05-20
 
