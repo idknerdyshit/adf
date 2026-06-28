@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-28
+
+### Added
+
+- Redacted `tracing` instrumentation for parsing, validation, writing, and dirty-state transitions. (9e9cfb9)
+
 ## [0.4.0] - 2026-06-24
 
 ### Added
