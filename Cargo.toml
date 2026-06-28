@@ -14,10 +14,12 @@ categories = ["encoding", "parser-implementations"]
 
 [dependencies]
 quick-xml = "0.38.4"
+tracing = { version = "0.1.41", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 insta = "1.43"
 pretty_assertions = "1.4"
+tracing-subscriber = { version = "0.3.20", default-features = false, features = ["fmt", "std"] }
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -103,6 +103,14 @@ The default validator reports DTD-required elements as warnings, checks DTD enum
 
 `AdfDocument::validate_strict()` (or `validate_with(adf, ValidationOptions::default().strict(true))`) promotes the "missing required element" warnings to errors, suitable for gating on conformance.
 
+## Logging and Tracing
+
+`adf` emits passive `tracing` spans and events for parse, validation, and write operations. The crate does not install a subscriber; applications decide whether and how to collect those events.
+
+Trace fields are limited to structural metadata such as byte counts, parse options, model counts, dirty flags, validation issue counts, and error categories/positions. They intentionally do not include raw XML, element text, attribute values, validation messages, names, emails, phone numbers, addresses, identifiers, URLs, comments, or extension payloads.
+
+The public model and `AdfDocument::original()` still expose lead payloads; avoid logging those values directly when handling sensitive data.
+
 ## License
 
 Licensed under either of:

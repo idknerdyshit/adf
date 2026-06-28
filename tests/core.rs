@@ -6,7 +6,11 @@ use insta::assert_snapshot;
 use pretty_assertions::assert_eq;
 use std::borrow::Cow;
 use std::fmt::Write as _;
+use std::io::Write as IoWrite;
 use std::ops::Range;
+use std::sync::{Arc, Mutex};
+use tracing::Level;
+use tracing_subscriber::fmt::MakeWriter;
 
 const FULL_LEAD: &str = r#"<?xml version="1.0"?>
 <?adf version="1.0"?>
@@ -96,6 +100,42 @@ fn assert_original_unchanged_outside_span(input: &str, output: &str, span: Range
     );
 }
 
+#[derive(Clone, Default)]
+struct TraceBuffer {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl TraceBuffer {
+    fn output(&self) -> String {
+        String::from_utf8(self.bytes.lock().unwrap().clone()).expect("trace output is UTF-8")
+    }
+}
+
+struct TraceBufferWriter {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl IoWrite for TraceBufferWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.bytes.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'writer> MakeWriter<'writer> for TraceBuffer {
+    type Writer = TraceBufferWriter;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        TraceBufferWriter {
+            bytes: Arc::clone(&self.bytes),
+        }
+    }
+}
+
 #[test]
 fn parses_core_adf_shape() {
     let doc = parse(FULL_LEAD).expect("valid ADF should parse");
@@ -134,6 +174,68 @@ fn parses_core_adf_shape() {
         contact.emails[0].attributes[0].name.as_ref(),
         "preferredcontact"
     );
+}
+
+#[test]
+fn tracing_omits_pii_and_secret_payloads() {
+    let buffer = TraceBuffer::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(Level::TRACE)
+        .without_time()
+        .with_ansi(false)
+        .with_writer(buffer.clone())
+        .finish();
+
+    let input = r#"<adf><prospect status="mystery" partner-token="dealer-secret"><id source="crm">LEAD-SECRET-42</id><requestdate>not-a-date</requestdate><vehicle><year>2024</year><make>Honda</make><model>Civic</model><vin>1HGCM82633A004352</vin><comments>Customer says password is rosebud</comments></vehicle><customer><contact primarycontact="1"><name part="full">Jane Private</name><email preferredcontact="1">jane.private@example.com</email><phone type="voice">313-555-0182</phone><address type="home"><street>123 Secret Lane</street><city>Detroit</city><postalcode>48201</postalcode><country>US</country></address><p:loyalty xmlns:p="urn:partner" api-key="sk_live_123">VIP customer</p:loyalty></contact><comments>SSN 111-22-3333</comments></customer><vendor><vendorname>Confidential Motors</vendorname><url>https://dealer.example/private</url></vendor></prospect></adf>"#;
+
+    tracing::subscriber::set_global_default(subscriber).expect("global subscriber installs once");
+    tracing::callsite::rebuild_interest_cache();
+
+    let mut doc = parse(input).expect("valid ADF should parse");
+    let report = doc.validate();
+    assert!(
+        !report.issues.is_empty(),
+        "input should produce validation events"
+    );
+    doc.prospect_mut(0).unwrap().status = Some(Cow::Borrowed("resend"));
+    let _ = doc.to_original_preserving_string().unwrap();
+    let _ = doc.to_typed_string().unwrap();
+    let _ = doc.root();
+
+    let traces = buffer.output();
+    assert!(
+        traces.contains("ADF validation complete"),
+        "missing validation trace:\n{traces}"
+    );
+    assert!(
+        traces.contains("ADF write complete"),
+        "missing write trace:\n{traces}"
+    );
+
+    for sensitive in [
+        "mystery",
+        "dealer-secret",
+        "LEAD-SECRET-42",
+        "not-a-date",
+        "1HGCM82633A004352",
+        "password is rosebud",
+        "Jane Private",
+        "jane.private@example.com",
+        "313-555-0182",
+        "123 Secret Lane",
+        "Detroit",
+        "48201",
+        "sk_live_123",
+        "VIP customer",
+        "SSN 111-22-3333",
+        "Confidential Motors",
+        "https://dealer.example/private",
+    ] {
+        assert!(
+            !traces.contains(sensitive),
+            "trace output leaked sensitive payload {sensitive:?}:\n{traces}"
+        );
+    }
 }
 
 #[test]

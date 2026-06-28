@@ -147,6 +147,9 @@ pub fn validate<'a>(adf: &Adf<'a>) -> ValidationReport<'a> {
 }
 
 pub fn validate_with<'a>(adf: &Adf<'a>, options: ValidationOptions) -> ValidationReport<'a> {
+    let span = tracing::debug_span!("adf.validate", strict = options.strict);
+    let _span_guard = span.enter();
+
     let mut report = ValidationReport::default();
 
     if adf.prospects.is_empty() {
@@ -162,6 +165,20 @@ pub fn validate_with<'a>(adf: &Adf<'a>, options: ValidationOptions) -> Validatio
         validate_prospect(&mut report, &path, prospect, options);
     }
 
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        let stats = crate::trace::DocumentStats::from_adf(adf);
+        let (warnings, errors) = crate::trace::validation_issue_counts(&report);
+        tracing::debug!(
+            prospects = stats.prospects,
+            vehicles = stats.vehicles,
+            contacts = stats.contacts,
+            addresses = stats.addresses,
+            extensions = stats.extensions,
+            warnings,
+            errors,
+            "ADF validation complete"
+        );
+    }
     report
 }
 

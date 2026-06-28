@@ -69,8 +69,33 @@ pub(crate) fn parse(input: &str) -> Result<AdfDocument<'_>> {
 }
 
 pub(crate) fn parse_with<'a>(input: &'a str, options: &ParseOptions) -> Result<AdfDocument<'a>> {
-    let root = parse_tree(input, options)?;
+    let span = tracing::debug_span!(
+        "adf.parse",
+        input_bytes = input.len(),
+        reject_doctype = options.reject_doctype,
+        max_doctype_len = ?options.max_doctype_len
+    );
+    let _span_guard = span.enter();
+
+    let root = match parse_tree(input, options) {
+        Ok(root) => root,
+        Err(error) => {
+            crate::trace::record_error("parse", &error);
+            return Err(error);
+        }
+    };
     let (adf, prospect_spans) = adf_from_root(root);
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        let stats = crate::trace::DocumentStats::from_adf(&adf);
+        tracing::debug!(
+            prospects = stats.prospects,
+            vehicles = stats.vehicles,
+            contacts = stats.contacts,
+            addresses = stats.addresses,
+            extensions = stats.extensions,
+            "ADF parse complete"
+        );
+    }
     Ok(AdfDocument::new(input, *options, adf, prospect_spans))
 }
 

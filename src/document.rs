@@ -77,6 +77,12 @@ impl<'a> AdfDocument<'a> {
     /// tree is kept lazy so callers that only need typed ADF fields avoid
     /// retaining two complete document representations.
     pub fn root(&self) -> &XmlElement<'a> {
+        if self.raw_root.get().is_none() {
+            tracing::trace!(
+                input_bytes = self.original.len(),
+                "parsing lazy raw XML tree"
+            );
+        }
         self.raw_root.get_or_init(|| {
             crate::parse::parse_tree(self.original, &self.parse_options)
                 .expect("original input was already parsed successfully")
@@ -89,13 +95,16 @@ impl<'a> AdfDocument<'a> {
 
     pub fn adf_mut(&mut self) -> &mut Adf<'a> {
         self.dirty_all = true;
+        tracing::trace!("marked full ADF document dirty");
         &mut self.adf
     }
 
     pub fn prospect_mut(&mut self, index: usize) -> Option<&mut Prospect<'a>> {
+        let found = index < self.adf.prospects.len();
         if let Some(dirty) = self.dirty_prospects.get_mut(index) {
             *dirty = true;
         }
+        tracing::trace!(prospect_index = index, found, "requested mutable prospect");
         self.adf.prospects.get_mut(index)
     }
 
@@ -112,22 +121,88 @@ impl<'a> AdfDocument<'a> {
     }
 
     pub fn write_original_preserving<W: Write>(&self, writer: W) -> Result<()> {
-        crate::write::write_original_preserving(writer, self)
+        let span = tracing::debug_span!(
+            "adf.write.original_preserving",
+            input_bytes = self.original.len(),
+            dirty_all = self.dirty_all
+        );
+        let _span_guard = span.enter();
+
+        match crate::write::write_original_preserving(writer, self) {
+            Ok(()) => {
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    let stats = crate::trace::DocumentStats::from_adf(&self.adf);
+                    let dirty_prospects = crate::trace::dirty_prospect_count(&self.dirty_prospects);
+                    tracing::debug!(
+                        prospects = stats.prospects,
+                        vehicles = stats.vehicles,
+                        contacts = stats.contacts,
+                        addresses = stats.addresses,
+                        extensions = stats.extensions,
+                        dirty_prospects,
+                        mode = self.write_preservation_mode(),
+                        "ADF write complete"
+                    );
+                }
+                Ok(())
+            }
+            Err(error) => {
+                crate::trace::record_error("write_original_preserving", &error);
+                Err(error)
+            }
+        }
     }
 
     pub fn write_typed<W: Write>(&self, writer: W) -> Result<()> {
-        crate::write::write_adf(writer, &self.adf)
+        let span = tracing::debug_span!("adf.write.typed");
+        let _span_guard = span.enter();
+
+        match crate::write::write_adf(writer, &self.adf) {
+            Ok(()) => {
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    let stats = crate::trace::DocumentStats::from_adf(&self.adf);
+                    tracing::debug!(
+                        prospects = stats.prospects,
+                        vehicles = stats.vehicles,
+                        contacts = stats.contacts,
+                        addresses = stats.addresses,
+                        extensions = stats.extensions,
+                        "ADF write complete"
+                    );
+                }
+                Ok(())
+            }
+            Err(error) => {
+                crate::trace::record_error("write_typed", &error);
+                Err(error)
+            }
+        }
     }
 
     pub fn to_original_preserving_string(&self) -> Result<String> {
         let mut bytes = Vec::new();
         self.write_original_preserving(&mut bytes)?;
+        tracing::trace!(
+            output_bytes = bytes.len(),
+            "original-preserving string created"
+        );
         Ok(String::from_utf8(bytes).expect("ADF writer only emits UTF-8"))
     }
 
     pub fn to_typed_string(&self) -> Result<String> {
         let mut bytes = Vec::new();
         self.write_typed(&mut bytes)?;
+        tracing::trace!(output_bytes = bytes.len(), "typed string created");
         Ok(String::from_utf8(bytes).expect("ADF writer only emits UTF-8"))
+    }
+
+    fn write_preservation_mode(&self) -> &'static str {
+        if self.dirty_all {
+            "typed"
+        } else if self.dirty_prospects.iter().any(|dirty| *dirty) {
+            "localized"
+        } else {
+            "copy"
+        }
     }
 }

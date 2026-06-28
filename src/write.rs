@@ -40,6 +40,10 @@ pub(crate) fn write_original_preserving<W: Write>(
     document: &AdfDocument<'_>,
 ) -> Result<()> {
     if document.dirty_all {
+        tracing::debug!(
+            reason = "dirty_all",
+            "original-preserving write using typed writer"
+        );
         return write_adf(writer, &document.adf);
     }
 
@@ -49,9 +53,19 @@ pub(crate) fn write_original_preserving<W: Write>(
             continue;
         }
         let Some(span) = document.prospect_spans.get(index) else {
+            tracing::debug!(
+                reason = "missing_prospect_span",
+                prospect_index = index,
+                "original-preserving write using typed writer"
+            );
             return write_adf(writer, &document.adf);
         };
         let Some(prospect) = document.adf.prospects.get(index) else {
+            tracing::debug!(
+                reason = "missing_prospect",
+                prospect_index = index,
+                "original-preserving write using typed writer"
+            );
             return write_adf(writer, &document.adf);
         };
 
