@@ -116,7 +116,12 @@ pub(crate) fn error_kind(error: &Error) -> &'static str {
         Error::MismatchedEnd { .. } => "mismatched_end",
         Error::UnexpectedEnd { .. } => "unexpected_end",
         Error::ContentOutsideRoot { .. } => "content_outside_root",
+        Error::UnexpectedRoot { .. } => "unexpected_root",
         Error::InvalidCharacterReference { .. } => "invalid_character_reference",
+        Error::InvalidEntityReference { .. } => "invalid_entity_reference",
+        Error::IllegalCharacter { .. } => "illegal_character",
+        Error::InvalidName { .. } => "invalid_name",
+        Error::InvalidXmlToken { .. } => "invalid_xml_token",
         Error::DocTypeForbidden { .. } => "doctype_forbidden",
         Error::DocTypeTooLong { .. } => "doctype_too_long",
         Error::MissingRoot => "missing_root",
@@ -134,10 +139,17 @@ pub(crate) fn error_position(error: &Error) -> Option<u64> {
         | Error::MismatchedEnd { position, .. }
         | Error::UnexpectedEnd { position, .. }
         | Error::ContentOutsideRoot { position }
+        | Error::UnexpectedRoot { position, .. }
         | Error::InvalidCharacterReference { position, .. }
+        | Error::InvalidEntityReference { position, .. }
+        | Error::IllegalCharacter { position, .. }
         | Error::DocTypeForbidden { position }
         | Error::DocTypeTooLong { position, .. } => Some(*position),
-        Error::MissingRoot | Error::MultipleRoots | Error::Io(_) => None,
+        Error::MissingRoot
+        | Error::MultipleRoots
+        | Error::InvalidName { .. }
+        | Error::InvalidXmlToken { .. }
+        | Error::Io(_) => None,
     }
 }
 

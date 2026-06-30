@@ -29,5 +29,5 @@ expression: xml
 <vendorname>Koons Internet Outlet</vendorname></vendor>
 <provider>
 <name part="full">CarPoint</name>
-<service>Used Car Classifieds</service></provider></prospect>
+<service>Used Car Classifieds</service></provider></prospect><!-- keep me -->
 </adf>

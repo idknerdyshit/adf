@@ -1,9 +1,9 @@
-use crate::Result;
 use crate::document::{AdfDocument, Attribute, Span, XmlElement, XmlNode};
 use crate::model::{
     Address, Adf, ColorCombination, Contact, Customer, Finance, Id, Name, Price, Prospect,
     Provider, TextElement, TextPart, Timeframe, Vehicle, VehicleOption, Vendor,
 };
+use crate::{Error, Result};
 use std::io::Write;
 
 pub(crate) fn write_adf<W: Write>(mut writer: W, adf: &Adf<'_>) -> Result<()> {
@@ -744,7 +744,7 @@ fn push_opt_text<'model, 'input>(
 }
 
 fn write_children<W: Write>(writer: &mut W, children: &mut [Child<'_, '_>]) -> Result<()> {
-    let known_spans: Vec<_> = children
+    let mut known_spans: Vec<_> = children
         .iter()
         .filter(|child| !child.is_extension())
         .filter_map(|child| {
@@ -756,20 +756,26 @@ fn write_children<W: Write>(writer: &mut W, children: &mut [Child<'_, '_>]) -> R
             }
         })
         .collect();
+    known_spans.sort_by_key(|(start, _)| *start);
+    let mut max_order = 0;
+    for (_, order) in &mut known_spans {
+        max_order = max_order.max(*order);
+        *order = max_order;
+    }
 
-    children.sort_by_key(|child| {
+    children.sort_by_cached_key(|child| {
         let span = child.span();
         if span.start == 0 && span.end == 0 {
             return (1, child.order(), usize::MAX);
         }
 
         if child.is_extension() {
-            let order = known_spans
-                .iter()
-                .filter(|(known_start, _)| *known_start < span.start)
-                .map(|(_, order)| *order)
-                .max()
-                .map_or(1, |order| order.saturating_mul(2).saturating_add(3));
+            let index = known_spans.partition_point(|(known_start, _)| *known_start < span.start);
+            let order = if index == 0 {
+                1
+            } else {
+                known_spans[index - 1].1.saturating_mul(2).saturating_add(3)
+            };
             (0, order, span.start)
         } else {
             (
@@ -850,6 +856,7 @@ fn write_text_parts<W: Write>(writer: &mut W, parts: &[TextPart<'_>]) -> Result<
             TextPart::Text(text) => write_escaped_text(writer, text)?,
             TextPart::CData(text) => write_cdata(writer, text)?,
             TextPart::EntityRef(name) => {
+                crate::parse::ensure_entity_name(name, 0)?;
                 writer.write_all(b"&")?;
                 writer.write_all(name.as_bytes())?;
                 writer.write_all(b";")?;
@@ -861,6 +868,7 @@ fn write_text_parts<W: Write>(writer: &mut W, parts: &[TextPart<'_>]) -> Result<
 }
 
 fn write_cdata<W: Write>(writer: &mut W, text: &str) -> Result<()> {
+    validate_xml_chars(text)?;
     let mut remaining = text;
     loop {
         if let Some(index) = remaining.find("]]>") {
@@ -884,30 +892,35 @@ fn write_xml_node<W: Write>(writer: &mut W, node: &XmlNode<'_>) -> Result<()> {
         XmlNode::Text(text) => write_escaped_text(writer, text),
         XmlNode::CData(text) => write_cdata(writer, text),
         XmlNode::EntityRef(name) => {
+            crate::parse::ensure_entity_name(name, 0)?;
             writer.write_all(b"&")?;
             writer.write_all(name.as_bytes())?;
             writer.write_all(b";")?;
             Ok(())
         }
         XmlNode::Comment(comment) => {
+            validate_comment(comment)?;
             writer.write_all(b"<!--")?;
             writer.write_all(comment.as_bytes())?;
             writer.write_all(b"-->")?;
             Ok(())
         }
         XmlNode::ProcessingInstruction(pi) => {
+            validate_processing_instruction(pi)?;
             writer.write_all(b"<?")?;
             writer.write_all(pi.as_bytes())?;
             writer.write_all(b"?>")?;
             Ok(())
         }
         XmlNode::Declaration(decl) => {
+            validate_wrapped_token("declaration", decl, "?>")?;
             writer.write_all(b"<?")?;
             writer.write_all(decl.as_bytes())?;
             writer.write_all(b"?>")?;
             Ok(())
         }
         XmlNode::DocType(doc_type) => {
+            validate_wrapped_token("DOCTYPE", doc_type, ">")?;
             writer.write_all(b"<!DOCTYPE ")?;
             writer.write_all(doc_type.as_bytes())?;
             writer.write_all(b">")?;
@@ -976,12 +989,14 @@ fn start_preserving_known<W: Write>(
 }
 
 fn start_open<W: Write>(writer: &mut W, name: &str) -> Result<()> {
+    validate_name(name, "element")?;
     writer.write_all(b"\n<")?;
     writer.write_all(name.as_bytes())?;
     Ok(())
 }
 
 fn write_attr<W: Write>(writer: &mut W, name: &str, value: &str) -> Result<()> {
+    validate_name(name, "attribute")?;
     writer.write_all(b" ")?;
     writer.write_all(name.as_bytes())?;
     writer.write_all(b"=\"")?;
@@ -991,6 +1006,7 @@ fn write_attr<W: Write>(writer: &mut W, name: &str, value: &str) -> Result<()> {
 }
 
 fn end<W: Write>(writer: &mut W, name: &str) -> Result<()> {
+    validate_name(name, "element")?;
     writer.write_all(b"</")?;
     writer.write_all(name.as_bytes())?;
     writer.write_all(b">")?;
@@ -998,11 +1014,71 @@ fn end<W: Write>(writer: &mut W, name: &str) -> Result<()> {
 }
 
 fn write_escaped_text<W: Write>(writer: &mut W, value: &str) -> Result<()> {
+    validate_xml_chars(value)?;
     write_escaped(writer, value, text_escape)
 }
 
 fn write_escaped_attr<W: Write>(writer: &mut W, value: &str) -> Result<()> {
+    validate_xml_chars(value)?;
     write_escaped(writer, value, attr_escape)
+}
+
+fn validate_name(name: &str, kind: &'static str) -> Result<()> {
+    if crate::parse::is_xml_name(name) {
+        Ok(())
+    } else {
+        Err(Error::InvalidName { kind })
+    }
+}
+
+fn validate_xml_chars(value: &str) -> Result<()> {
+    crate::parse::ensure_xml_chars(value, 0)
+}
+
+fn validate_comment(comment: &str) -> Result<()> {
+    validate_xml_chars(comment)?;
+    if comment.contains("--") {
+        return Err(Error::InvalidXmlToken {
+            kind: "comment",
+            reason: "contains forbidden `--` sequence",
+        });
+    }
+    if comment.ends_with('-') {
+        return Err(Error::InvalidXmlToken {
+            kind: "comment",
+            reason: "ends with `-`",
+        });
+    }
+    Ok(())
+}
+
+fn validate_processing_instruction(pi: &str) -> Result<()> {
+    validate_wrapped_token("processing instruction", pi, "?>")?;
+    let target = pi.split_whitespace().next().unwrap_or(pi);
+    if target.is_empty() {
+        return Err(Error::InvalidXmlToken {
+            kind: "processing instruction",
+            reason: "missing target",
+        });
+    }
+    if target.eq_ignore_ascii_case("xml") {
+        return Err(Error::InvalidXmlToken {
+            kind: "processing instruction",
+            reason: "target `xml` is reserved",
+        });
+    }
+    validate_name(target, "processing instruction target")
+}
+
+fn validate_wrapped_token(kind: &'static str, value: &str, forbidden: &'static str) -> Result<()> {
+    validate_xml_chars(value)?;
+    if value.contains(forbidden) {
+        return Err(Error::InvalidXmlToken {
+            kind,
+            reason: "contains its closing delimiter",
+        });
+    }
+    Ok(())
 }
 
 fn write_escaped<W: Write>(

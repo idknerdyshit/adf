@@ -1,0 +1,11 @@
+---
+source: tests/core.rs
+expression: "normalized_issues(input, &report)"
+---
+warning|adf.prospect[0].provider.email@preferredcontact|value "yes" is not one of: 0, 1|<email preferredcontact="yes">p@example.com</email>
+warning|adf.prospect[0].provider.phone@type|value "sms" is not one of: voice, fax, cellphone, pager|<phone type="sms" time="never" preferredcontact="maybe">555</phone>
+warning|adf.prospect[0].provider.phone@time|value "never" is not one of: morning, afternoon, evening, nopreference, day|<phone type="sms" time="never" preferredcontact="maybe">555</phone>
+warning|adf.prospect[0].provider.phone@preferredcontact|value "maybe" is not one of: 0, 1|<phone type="sms" time="never" preferredcontact="maybe">555</phone>
+error|adf.prospect[0].provider.contact[0]|contact is missing name|<contact primarycontact="yes"><phone type="sms">555</phone></contact>
+warning|adf.prospect[0].provider.contact[0]@primarycontact|value "yes" is not one of: 0, 1|<contact primarycontact="yes"><phone type="sms">555</phone></contact>
+warning|adf.prospect[0].provider.contact[0].phone[0]@type|value "sms" is not one of: voice, fax, cellphone, pager|<phone type="sms">555</phone>

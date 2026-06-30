@@ -1,0 +1,8 @@
+---
+source: tests/core.rs
+expression: "normalized_issues(input, &report)"
+---
+warning|adf.prospect[0]@status|value "weird" is not one of: new, resend|<prospect status="weird"><requestdate>2024-01-02T03:04:05-05:00</requestdate><vehicle interest="loan" status="brand-new"><year>2024</year><make>X</make><model>Y</model><price type="bizarre" currency="USD">1</price></vehicle><customer><contact><name part="full">A</name><email>a@example.com</email></contact></customer><vendor><vendorname>V</vendorname><contact><name part="full">B</name><email>b@example.com</email></contact></vendor></prospect>
+warning|adf.prospect[0].vehicle[0]@interest|value "loan" is not one of: buy, lease, sell, trade-in, test-drive|<vehicle interest="loan" status="brand-new"><year>2024</year><make>X</make><model>Y</model><price type="bizarre" currency="USD">1</price></vehicle>
+warning|adf.prospect[0].vehicle[0]@status|value "brand-new" is not one of: new, used|<vehicle interest="loan" status="brand-new"><year>2024</year><make>X</make><model>Y</model><price type="bizarre" currency="USD">1</price></vehicle>
+warning|adf.prospect[0].vehicle[0].price[0]@type|value "bizarre" is not one of: quote, offer, msrp, invoice, call, appraisal, asking|<price type="bizarre" currency="USD">1</price>

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Reject XML-illegal characters and invalid comments during parsing.
+- Reject XML documents whose root element is not `<adf>`.
+- Preserve unknown entity references in attribute values as literal text instead of rejecting them.
+- Preserve non-element extension nodes during typed conversion instead of dropping them.
+- Keep lenient validation warnings lenient for empty `<adf>` documents.
+- Validate provider contacts and direct provider email/phone attributes.
+- Clarify that currency/country validation is a shape check, not full registry validation.
+- Clarify and test that strict validation only promotes missing required structure.
+- Avoid quadratic extension-order key construction in typed writing.
+- Validate caller-constructed raw XML tokens before typed writing.
+
 ## [0.4.1] - 2026-06-28
 
 ### Added
@@ -43,18 +56,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - Byte spans on every typed model node and on `ValidationIssue`, so a validation warning or error can be mapped back to its exact location in the original input. (db48dc6)
 - `parse_with` and `ParseOptions` for configuring parser hardening, plus the `DEFAULT_MAX_DOCTYPE_LEN` constant (4096 bytes).
-- `ParseOptions::reject_doctype` to reject any document containing a `<!DOCTYPE>` declaration, and `max_doctype_len` to bound the size of a DOCTYPE internal subset (checked on raw bytes before decoding).
+- `ParseOptions::reject_doctype` to reject any document containing a `<!DOCTYPE>` declaration, and `max_doctype_len` to bound the size of a DOCTYPE declaration payload (checked on raw bytes before decoding).
 - Builder methods for ergonomic option construction: `ParseOptions::reject_doctype`, `max_doctype_len`, `without_doctype_limit`, and `ValidationOptions::strict`.
 
 ### Changed
 
 - **Breaking:** `ValidationOptions` and `ParseOptions` are now `#[non_exhaustive]`. Construct them from `ValidationOptions::default()` / `ParseOptions::default()` and the builder methods rather than struct literals.
-- **Breaking:** `parse` now rejects `<!DOCTYPE>` declarations whose internal subset exceeds `DEFAULT_MAX_DOCTYPE_LEN` (4096 bytes) by default. Use `ParseOptions::max_doctype_len` or `without_doctype_limit` to change this.
+- **Breaking:** `parse` now rejects `<!DOCTYPE>` declarations whose payload exceeds `DEFAULT_MAX_DOCTYPE_LEN` (4096 bytes) by default. Use `ParseOptions::max_doctype_len` or `without_doctype_limit` to change this.
 
 ### Security
 
 - Documented and regression-tested that the parser never resolves external entities and never expands custom (DTD-defined) entities, leaving classic XXE and entity-expansion ("billion laughs") attacks structurally impossible.
-- Default DOCTYPE size cap bounds the cost of processing an untrusted DTD internal subset.
+- Default DOCTYPE size cap bounds the cost of processing an untrusted DTD declaration.
 
 ## [0.1.0] - 2026-05-17
 

@@ -6,28 +6,29 @@ use crate::model::{
     resolve_standard_entity,
 };
 use quick_xml::Reader;
+use quick_xml::encoding::Decoder;
 use quick_xml::events::{BytesStart, Event};
 use std::borrow::Cow;
 use std::ops::Range;
 use std::str;
 
 /// Default ceiling, in bytes, on the length of a `<!DOCTYPE …>` declaration's
-/// internal subset. Legitimate ADF documents rarely carry a DTD at all; the
-/// cap keeps entity-definition payloads bounded while leaving room for a small
-/// internal subset.
+/// payload. Legitimate ADF documents rarely carry a DTD at all; the cap keeps
+/// entity-definition payloads bounded while leaving room for a small
+/// declaration.
 pub const DEFAULT_MAX_DOCTYPE_LEN: usize = 4096;
 
-/// Options controlling how strictly [`parse_with`] treats the input.
+/// Options controlling how strictly [`crate::parse_with`] treats the input.
 ///
 /// The defaults preserve partner data (DOCTYPE declarations are kept, not
-/// rejected) while still bounding the size of any DTD internal subset.
+/// rejected) while still bounding the size of any DTD declaration payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ParseOptions {
     /// Reject any document that contains a `<!DOCTYPE …>` declaration.
     pub reject_doctype: bool,
     /// Maximum allowed length, in bytes, of a `<!DOCTYPE …>` declaration's
-    /// internal subset. `None` disables the limit. Ignored when
+    /// payload. `None` disables the limit. Ignored when
     /// `reject_doctype` is set, since the declaration is rejected outright.
     pub max_doctype_len: Option<usize>,
 }
@@ -49,7 +50,7 @@ impl ParseOptions {
         self
     }
 
-    /// Cap the byte length of a `<!DOCTYPE …>` declaration's internal subset.
+    /// Cap the byte length of a `<!DOCTYPE …>` declaration's payload.
     #[must_use]
     pub fn max_doctype_len(mut self, limit: usize) -> Self {
         self.max_doctype_len = Some(limit);
@@ -84,7 +85,7 @@ pub(crate) fn parse_with<'a>(input: &'a str, options: &ParseOptions) -> Result<A
             return Err(error);
         }
     };
-    let (adf, prospect_spans) = adf_from_root(root);
+    let (adf, prospect_spans) = adf_from_root(root)?;
     if tracing::enabled!(tracing::Level::DEBUG) {
         let stats = crate::trace::DocumentStats::from_adf(&adf);
         tracing::debug!(
@@ -101,7 +102,11 @@ pub(crate) fn parse_with<'a>(input: &'a str, options: &ParseOptions) -> Result<A
 
 pub(crate) fn parse_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<XmlElement<'a>> {
     let mut reader = Reader::from_str(input);
-    reader.config_mut().trim_text(false);
+    {
+        let config = reader.config_mut();
+        config.trim_text(false);
+        config.check_comments = true;
+    }
     let mut stack: Vec<XmlElement<'_>> = Vec::new();
     let mut root: Option<XmlElement<'_>> = None;
 
@@ -150,49 +155,45 @@ pub(crate) fn parse_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<X
                 element.span.end = reader.buffer_position() as usize;
                 append_element(&mut stack, &mut root, element)?;
             }
-            Event::Text(text) => append_node(
-                &mut stack,
-                root.is_some(),
-                XmlNode::Text(
-                    text.xml_content()
-                        .map_err(|source| Error::encoding(position, source))?,
-                ),
-                position,
-            )?,
-            Event::CData(cdata) => append_node(
-                &mut stack,
-                root.is_some(),
-                XmlNode::CData(
-                    cdata
-                        .decode()
-                        .map_err(|source| Error::encoding(position, source))?,
-                ),
-                position,
-            )?,
-            Event::Comment(comment) => append_node(
-                &mut stack,
-                root.is_some(),
-                XmlNode::Comment(
-                    comment
-                        .decode()
-                        .map_err(|source| Error::encoding(position, source))?,
-                ),
-                position,
-            )?,
+            Event::Text(text) => {
+                let text = text
+                    .xml_content()
+                    .map_err(|source| Error::encoding(position, source))?;
+                ensure_xml_chars(&text, position)?;
+                append_node(&mut stack, root.is_some(), XmlNode::Text(text), position)?;
+            }
+            Event::CData(cdata) => {
+                let cdata = cdata
+                    .decode()
+                    .map_err(|source| Error::encoding(position, source))?;
+                ensure_xml_chars(&cdata, position)?;
+                append_node(&mut stack, root.is_some(), XmlNode::CData(cdata), position)?;
+            }
+            Event::Comment(comment) => {
+                let comment = comment
+                    .decode()
+                    .map_err(|source| Error::encoding(position, source))?;
+                ensure_xml_chars(&comment, position)?;
+                append_node(
+                    &mut stack,
+                    root.is_some(),
+                    XmlNode::Comment(comment),
+                    position,
+                )?;
+            }
             Event::PI(pi) => append_node(
                 &mut stack,
                 root.is_some(),
-                XmlNode::ProcessingInstruction(Cow::Owned(
-                    name_from_bytes(pi.as_ref(), position)?.to_owned(),
-                )),
+                XmlNode::ProcessingInstruction(Cow::Owned(validated_name_payload(
+                    pi.as_ref(),
+                    position,
+                )?)),
                 position,
             )?,
             Event::Decl(decl) => append_node(
                 &mut stack,
                 root.is_some(),
-                XmlNode::Declaration(Cow::Owned(
-                    name_from_bytes(decl.as_ref(), position)?.to_owned(),
-                )),
+                XmlNode::Declaration(Cow::Owned(validated_name_payload(decl.as_ref(), position)?)),
                 position,
             )?,
             Event::DocType(doc_type) => {
@@ -215,6 +216,7 @@ pub(crate) fn parse_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<X
                 let decoded = doc_type
                     .decode()
                     .map_err(|source| Error::encoding(position, source))?;
+                ensure_xml_chars(&decoded, position)?;
                 append_node(
                     &mut stack,
                     root.is_some(),
@@ -263,16 +265,7 @@ fn element_from_start<'a>(
     for attr in start.attributes() {
         let attr = attr.map_err(|source| Error::Attribute { position, source })?;
         let attr_name = borrowed_name(input, attr.key.as_ref(), position)?;
-        let value = attr
-            .decode_and_unescape_value(reader.decoder())
-            .map_err(|source| Error::xml(position, source))?;
-        let value = match value {
-            Cow::Borrowed(slice) => match borrowed_from_input(input, slice.as_bytes()) {
-                Some(borrowed) => Cow::Borrowed(borrowed),
-                None => Cow::Owned(slice.to_owned()),
-            },
-            Cow::Owned(owned) => Cow::Owned(owned),
-        };
+        let value = decode_attribute_value(input, attr.value.as_ref(), reader.decoder(), position)?;
         attributes.push(Attribute {
             name: attr_name,
             value,
@@ -327,6 +320,12 @@ fn name_from_bytes(bytes: &[u8], position: u64) -> Result<&str> {
     str::from_utf8(bytes).map_err(|source| Error::Utf8 { position, source })
 }
 
+fn validated_name_payload(bytes: &[u8], position: u64) -> Result<String> {
+    let value = name_from_bytes(bytes, position)?;
+    ensure_xml_chars(value, position)?;
+    Ok(value.to_owned())
+}
+
 fn borrowed_name<'a>(input: &'a str, bytes: &[u8], position: u64) -> Result<Cow<'a, str>> {
     let name = name_from_bytes(bytes, position)?;
     Ok(match borrowed_from_input(input, bytes) {
@@ -371,6 +370,7 @@ fn general_ref_node<'a>(entity: Cow<'a, str>, position: u64) -> Result<XmlNode<'
     if entity.starts_with('#') {
         Ok(XmlNode::Text(decode_character_reference(entity, position)?))
     } else {
+        ensure_entity_name(&entity, position)?;
         Ok(XmlNode::EntityRef(entity))
     }
 }
@@ -397,19 +397,164 @@ fn decode_character_reference(entity: Cow<'_, str>, position: u64) -> Result<Cow
             position,
         });
     };
+    if !is_xml_char(ch) {
+        return Err(Error::InvalidCharacterReference {
+            reference: entity.to_string(),
+            position,
+        });
+    }
 
     Ok(Cow::Owned(ch.to_string()))
 }
 
-fn adf_from_root<'a>(root: XmlElement<'a>) -> (Adf<'a>, Vec<Range<usize>>) {
+fn decode_attribute_value<'a>(
+    input: &'a str,
+    raw: &[u8],
+    decoder: Decoder,
+    position: u64,
+) -> Result<Cow<'a, str>> {
+    let decoded = decoder
+        .decode(raw)
+        .map_err(|source| Error::encoding(position, source))?;
+    ensure_xml_chars(&decoded, position)?;
+
+    let decoded = match decode_entities_preserving_unknown(&decoded, position)? {
+        Cow::Borrowed(_) => decoded,
+        Cow::Owned(value) => Cow::Owned(value),
+    };
+
+    Ok(match decoded {
+        Cow::Borrowed(slice) => match borrowed_from_input(input, slice.as_bytes()) {
+            Some(borrowed) => Cow::Borrowed(borrowed),
+            None => Cow::Owned(slice.to_owned()),
+        },
+        Cow::Owned(owned) => Cow::Owned(owned),
+    })
+}
+
+fn decode_entities_preserving_unknown(value: &str, position: u64) -> Result<Cow<'_, str>> {
+    if !value.as_bytes().contains(&b'&') {
+        return Ok(Cow::Borrowed(value));
+    }
+
+    let mut decoded = String::with_capacity(value.len());
+    let mut remaining = value;
+    loop {
+        let Some(start) = remaining.find('&') else {
+            decoded.push_str(remaining);
+            return Ok(Cow::Owned(decoded));
+        };
+        decoded.push_str(&remaining[..start]);
+        let entity_start = start + 1;
+        let after_amp = &remaining[entity_start..];
+        let Some(end) = after_amp.find(';') else {
+            return Err(Error::InvalidEntityReference {
+                reference: after_amp.to_owned(),
+                position,
+            });
+        };
+        let entity = &after_amp[..end];
+        if entity.is_empty() {
+            return Err(Error::InvalidEntityReference {
+                reference: String::new(),
+                position,
+            });
+        }
+        if let Some(resolved) = resolve_standard_entity(entity) {
+            decoded.push_str(resolved);
+        } else if entity.starts_with('#') {
+            decoded.push_str(&decode_character_reference(
+                Cow::Borrowed(entity),
+                position,
+            )?);
+        } else {
+            ensure_entity_name(entity, position)?;
+            decoded.push('&');
+            decoded.push_str(entity);
+            decoded.push(';');
+        }
+        remaining = &after_amp[end + 1..];
+    }
+}
+
+pub(crate) fn ensure_xml_chars(value: &str, position: u64) -> Result<()> {
+    if let Some(character) = value.chars().find(|ch| !is_xml_char(*ch)) {
+        return Err(Error::IllegalCharacter {
+            character,
+            position,
+        });
+    }
+    Ok(())
+}
+
+fn is_xml_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x09 | 0x0A | 0x0D | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF
+    )
+}
+
+pub(crate) fn ensure_entity_name(name: &str, position: u64) -> Result<()> {
+    if is_xml_name(name) {
+        Ok(())
+    } else {
+        Err(Error::InvalidEntityReference {
+            reference: name.to_owned(),
+            position,
+        })
+    }
+}
+
+pub(crate) fn is_xml_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    is_xml_name_start_char(first) && chars.all(is_xml_name_char)
+}
+
+fn is_xml_name_start_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3A
+            | 0x41..=0x5A
+            | 0x5F
+            | 0x61..=0x7A
+            | 0xC0..=0xD6
+            | 0xD8..=0xF6
+            | 0xF8..=0x2FF
+            | 0x370..=0x37D
+            | 0x37F..=0x1FFF
+            | 0x200C..=0x200D
+            | 0x2070..=0x218F
+            | 0x2C00..=0x2FEF
+            | 0x3001..=0xD7FF
+            | 0xF900..=0xFDCF
+            | 0xFDF0..=0xFFFD
+            | 0x10000..=0xEFFFF
+    )
+}
+
+fn is_xml_name_char(ch: char) -> bool {
+    is_xml_name_start_char(ch)
+        || matches!(
+            ch as u32,
+            0x2D
+                | 0x2E
+                | 0x30..=0x39
+                | 0xB7
+                | 0x0300..=0x036F
+                | 0x203F..=0x2040
+        )
+}
+
+fn adf_from_root<'a>(root: XmlElement<'a>) -> Result<(Adf<'a>, Vec<Range<usize>>)> {
     let mut prospect_spans = Vec::new();
     if root.name.as_ref() != "adf" {
-        let mut adf = Adf {
-            span: root.span,
-            ..Default::default()
-        };
-        adf.extensions.push(XmlNode::Element(root));
-        return (adf, prospect_spans);
+        return Err(Error::UnexpectedRoot {
+            found: root.name.into_owned(),
+            position: root.span.start as u64,
+        });
     }
 
     let XmlElement {
@@ -424,7 +569,10 @@ fn adf_from_root<'a>(root: XmlElement<'a>) -> (Adf<'a>, Vec<Range<usize>>) {
         ..Default::default()
     };
 
-    for child in element_children(children) {
+    for node in children {
+        let Some(child) = element_child_or_extension(node, &mut adf.extensions) else {
+            continue;
+        };
         match child.name.as_ref() {
             "prospect" => {
                 prospect_spans.push(child.span.start..child.span.end);
@@ -433,7 +581,7 @@ fn adf_from_root<'a>(root: XmlElement<'a>) -> (Adf<'a>, Vec<Range<usize>>) {
             _ => adf.extensions.push(XmlNode::Element(child)),
         }
     }
-    (adf, prospect_spans)
+    Ok((adf, prospect_spans))
 }
 
 fn prospect_from_element<'a>(element: XmlElement<'a>) -> Prospect<'a> {
@@ -450,7 +598,10 @@ fn prospect_from_element<'a>(element: XmlElement<'a>) -> Prospect<'a> {
         ..Default::default()
     };
 
-    for child in element_children(children) {
+    for node in children {
+        let Some(child) = element_child_or_extension(node, &mut prospect.extensions) else {
+            continue;
+        };
         match child.name.as_ref() {
             "id" => prospect.ids.push(id_from_element(child)),
             "requestdate" => prospect.request_date = Some(text_from_element(child)),
@@ -480,7 +631,10 @@ fn vehicle_from_element<'a>(element: XmlElement<'a>) -> Vehicle<'a> {
         ..Default::default()
     };
 
-    for child in element_children(children) {
+    for node in children {
+        let Some(child) = element_child_or_extension(node, &mut vehicle.extensions) else {
+            continue;
+        };
         match child.name.as_ref() {
             "id" => vehicle.ids.push(id_from_element(child)),
             "year" => vehicle.year = Some(text_from_element(child)),
@@ -522,7 +676,10 @@ fn color_combination_from_element<'a>(element: XmlElement<'a>) -> ColorCombinati
         span,
         ..Default::default()
     };
-    for child in element_children(children) {
+    for node in children {
+        let Some(child) = element_child_or_extension(node, &mut colors.extensions) else {
+            continue;
+        };
         match child.name.as_ref() {
             "interiorcolor" => colors.interior_color = Some(text_from_element(child)),
             "exteriorcolor" => colors.exterior_color = Some(text_from_element(child)),
@@ -545,7 +702,10 @@ fn option_from_element<'a>(element: XmlElement<'a>) -> VehicleOption<'a> {
         span,
         ..Default::default()
     };
-    for child in element_children(children) {
+    for node in children {
+        let Some(child) = element_child_or_extension(node, &mut option.extensions) else {
+            continue;
+        };
         match child.name.as_ref() {
             "optionname" => option.option_name = Some(text_from_element(child)),
             "manufacturercode" => option.manufacturer_code = Some(text_from_element(child)),
@@ -570,7 +730,10 @@ fn finance_from_element<'a>(element: XmlElement<'a>) -> Finance<'a> {
         span,
         ..Default::default()
     };
-    for child in element_children(children) {
+    for node in children {
+        let Some(child) = element_child_or_extension(node, &mut finance.extensions) else {
+            continue;
+        };
         match child.name.as_ref() {
             "method" => finance.method = Some(text_from_element(child)),
             "amount" => finance.amounts.push(text_from_element(child)),
@@ -593,7 +756,10 @@ fn customer_from_element<'a>(element: XmlElement<'a>) -> Customer<'a> {
         span,
         ..Default::default()
     };
-    for child in element_children(children) {
+    for node in children {
+        let Some(child) = element_child_or_extension(node, &mut customer.extensions) else {
+            continue;
+        };
         match child.name.as_ref() {
             "id" => customer.ids.push(id_from_element(child)),
             "contact" => customer.contacts.push(contact_from_element(child)),
@@ -617,7 +783,10 @@ fn timeframe_from_element<'a>(element: XmlElement<'a>) -> Timeframe<'a> {
         span,
         ..Default::default()
     };
-    for child in element_children(children) {
+    for node in children {
+        let Some(child) = element_child_or_extension(node, &mut timeframe.extensions) else {
+            continue;
+        };
         match child.name.as_ref() {
             "description" => timeframe.description = Some(text_from_element(child)),
             "earliestdate" => timeframe.earliest_date = Some(text_from_element(child)),
@@ -640,7 +809,10 @@ fn vendor_from_element<'a>(element: XmlElement<'a>) -> Vendor<'a> {
         span,
         ..Default::default()
     };
-    for child in element_children(children) {
+    for node in children {
+        let Some(child) = element_child_or_extension(node, &mut vendor.extensions) else {
+            continue;
+        };
         match child.name.as_ref() {
             "id" => vendor.ids.push(id_from_element(child)),
             "vendorname" => vendor.vendor_name = Some(text_from_element(child)),
@@ -664,7 +836,10 @@ fn provider_from_element<'a>(element: XmlElement<'a>) -> Provider<'a> {
         span,
         ..Default::default()
     };
-    for child in element_children(children) {
+    for node in children {
+        let Some(child) = element_child_or_extension(node, &mut provider.extensions) else {
+            continue;
+        };
         match child.name.as_ref() {
             "id" => provider.ids.push(id_from_element(child)),
             "name" => provider.name = Some(name_from_element(child)),
@@ -692,7 +867,10 @@ fn contact_from_element<'a>(element: XmlElement<'a>) -> Contact<'a> {
         span,
         ..Default::default()
     };
-    for child in element_children(children) {
+    for node in children {
+        let Some(child) = element_child_or_extension(node, &mut contact.extensions) else {
+            continue;
+        };
         match child.name.as_ref() {
             "name" => contact.names.push(name_from_element(child)),
             "email" => contact.emails.push(text_from_element(child)),
@@ -717,7 +895,10 @@ fn address_from_element<'a>(element: XmlElement<'a>) -> Address<'a> {
         span,
         ..Default::default()
     };
-    for child in element_children(children) {
+    for node in children {
+        let Some(child) = element_child_or_extension(node, &mut address.extensions) else {
+            continue;
+        };
         match child.name.as_ref() {
             "street" => address.streets.push(text_from_element(child)),
             "apartment" => address.apartment = Some(text_from_element(child)),
@@ -816,9 +997,16 @@ fn attr<'a>(attributes: &[Attribute<'a>], name: &str) -> Option<Cow<'a, str>> {
         .map(|attr| attr.value.clone())
 }
 
-fn element_children<'a>(children: Vec<XmlNode<'a>>) -> impl Iterator<Item = XmlElement<'a>> {
-    children.into_iter().filter_map(|child| match child {
+fn element_child_or_extension<'a>(
+    node: XmlNode<'a>,
+    extensions: &mut Vec<XmlNode<'a>>,
+) -> Option<XmlElement<'a>> {
+    match node {
         XmlNode::Element(element) => Some(element),
-        _ => None,
-    })
+        XmlNode::Text(text) if text.as_ref().bytes().all(is_xml_whitespace) => None,
+        extension => {
+            extensions.push(extension);
+            None
+        }
+    }
 }

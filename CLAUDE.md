@@ -32,7 +32,7 @@ The crate is organized around a parse → typed-model → write pipeline that ke
 
 Two distinctions are load-bearing:
 
-1. **XML parsing vs. ADF validation** — well-formed XML must parse successfully even when it is incomplete or invalid ADF. Don't bake ADF semantics into `parse.rs`.
+1. **XML parsing vs. ADF validation** — well-formed XML rooted at `<adf>` must parse successfully even when the ADF content is incomplete or invalid. Keep the root check in `parse.rs`, but leave deeper ADF content rules in validation.
 2. **Original-preserving vs. typed write** — `to_original_preserving_string` is the default for round-tripping partner data; `to_typed_string` is for normalized output after broad structural edits via `adf_mut`. Per-prospect edits via `prospect_mut` mark only that prospect dirty so its original span is the only region rewritten.
 
 ## Development Notes

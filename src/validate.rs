@@ -5,26 +5,38 @@ use crate::model::{
 use crate::{Attribute, TextElement};
 use std::borrow::Cow;
 
+/// Validation severity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
+    /// Advisory issue; the parsed document may still be usable.
     Warning,
+    /// Structural issue severe enough for [`ValidationReport::is_valid`] to fail.
     Error,
 }
 
+/// One validation finding with a model path and optional source span.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationIssue<'a> {
+    /// Whether this issue is a warning or error.
     pub severity: Severity,
+    /// Dot-style path into the typed ADF model.
     pub path: Cow<'a, str>,
+    /// Human-readable issue text. This never includes raw lead payload values
+    /// beyond short invalid enum/format samples.
     pub message: Cow<'a, str>,
+    /// Byte span in the original input when the issue maps to parsed XML.
     pub span: Option<Span>,
 }
 
+/// Collection of validation findings for an ADF model.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ValidationReport<'a> {
+    /// Findings emitted during validation.
     pub issues: Vec<ValidationIssue<'a>>,
 }
 
 impl ValidationReport<'_> {
+    /// Return `true` when the report contains no [`Severity::Error`] issues.
     pub fn is_valid(&self) -> bool {
         !self
             .issues
@@ -33,14 +45,21 @@ impl ValidationReport<'_> {
     }
 }
 
+/// Options controlling ADF validation strictness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct ValidationOptions {
+    /// Promote missing DTD-required structure from warnings to errors.
+    ///
+    /// Enumerated-value and lightweight format checks remain warnings in
+    /// strict mode; strictness only controls required structural fields.
     pub strict: bool,
 }
 
 impl ValidationOptions {
     /// Promote structural requirement checks from warnings to errors.
+    ///
+    /// This does not promote enum, date, country, or currency shape warnings.
     #[must_use]
     pub fn strict(mut self, strict: bool) -> Self {
         self.strict = strict;
@@ -142,23 +161,30 @@ const BALANCE_TYPE: AllowedValues = AllowedValues {
     display: "finance, residual, payoff, other",
 };
 
+/// Validate a typed ADF model with lenient default options.
 pub fn validate<'a>(adf: &Adf<'a>) -> ValidationReport<'a> {
     validate_with(adf, ValidationOptions::default())
 }
 
+/// Validate a typed ADF model with explicit options.
+///
+/// Validation is intentionally narrower than full DTD/schema validation. It
+/// checks required high-level ADF structure, common DTD enumerations, and
+/// lightweight date/country/currency shape rules. [`ValidationOptions::strict`]
+/// only changes the severity of missing required structure.
 pub fn validate_with<'a>(adf: &Adf<'a>, options: ValidationOptions) -> ValidationReport<'a> {
     let span = tracing::debug_span!("adf.validate", strict = options.strict);
     let _span_guard = span.enter();
 
     let mut report = ValidationReport::default();
 
-    if adf.prospects.is_empty() {
-        report.error(
-            "adf",
-            adf.span,
-            "ADF document should contain at least one prospect",
-        );
-    }
+    report.required(
+        options,
+        "adf",
+        adf.span,
+        !adf.prospects.is_empty(),
+        "ADF document should contain at least one prospect",
+    );
 
     for (index, prospect) in adf.prospects.iter().enumerate() {
         let path = format!("adf.prospect[{index}]");
@@ -241,7 +267,7 @@ fn validate_prospect(
         validate_vendor(report, path, vendor, options);
     }
     if let Some(provider) = &prospect.provider {
-        validate_provider(report, path, provider);
+        validate_provider(report, path, provider, options);
     }
     for (vehicle_index, vehicle) in prospect.vehicles.iter().enumerate() {
         validate_vehicle(
@@ -332,6 +358,7 @@ fn validate_provider(
     report: &mut ValidationReport<'_>,
     prospect_path: &str,
     provider: &Provider<'_>,
+    options: ValidationOptions,
 ) {
     let provider_path = format!("{prospect_path}.provider");
     if let Some(name) = &provider.name {
@@ -349,6 +376,22 @@ fn validate_provider(
             name.name_type.as_deref(),
             NAME_TYPE,
         );
+    }
+    if let Some(email) = &provider.email {
+        check_enum(
+            report,
+            || format!("{provider_path}.email@preferredcontact"),
+            email.span,
+            attr_value(&email.attributes, "preferredcontact"),
+            BOOL_FLAG,
+        );
+    }
+    if let Some(phone) = &provider.phone {
+        check_phone_attributes(report, || format!("{provider_path}.phone"), phone);
+    }
+    for (index, contact) in provider.contacts.iter().enumerate() {
+        let path = format!("{provider_path}.contact[{index}]");
+        validate_contact(report, &path, contact, options, false);
     }
 }
 
@@ -412,27 +455,7 @@ fn validate_contact(
 
     for (index, phone) in contact.phones.iter().enumerate() {
         let phone_path = format!("{path}.phone[{index}]");
-        check_enum(
-            report,
-            || format!("{phone_path}@type"),
-            phone.span,
-            attr_value(&phone.attributes, "type"),
-            PHONE_TYPE,
-        );
-        check_enum(
-            report,
-            || format!("{phone_path}@time"),
-            phone.span,
-            attr_value(&phone.attributes, "time"),
-            PHONE_TIME,
-        );
-        check_enum(
-            report,
-            || format!("{phone_path}@preferredcontact"),
-            phone.span,
-            attr_value(&phone.attributes, "preferredcontact"),
-            BOOL_FLAG,
-        );
+        check_phone_attributes(report, || phone_path, phone);
     }
 
     for (index, address) in contact.addresses.iter().enumerate() {
@@ -629,6 +652,35 @@ fn attr_value<'a>(attributes: &'a [Attribute<'a>], name: &str) -> Option<&'a str
         .map(|attr| attr.value.as_ref())
 }
 
+fn check_phone_attributes(
+    report: &mut ValidationReport<'_>,
+    path: impl FnOnce() -> String,
+    phone: &TextElement<'_>,
+) {
+    let path = path();
+    check_enum(
+        report,
+        || format!("{path}@type"),
+        phone.span,
+        attr_value(&phone.attributes, "type"),
+        PHONE_TYPE,
+    );
+    check_enum(
+        report,
+        || format!("{path}@time"),
+        phone.span,
+        attr_value(&phone.attributes, "time"),
+        PHONE_TIME,
+    );
+    check_enum(
+        report,
+        || format!("{path}@preferredcontact"),
+        phone.span,
+        attr_value(&phone.attributes, "preferredcontact"),
+        BOOL_FLAG,
+    );
+}
+
 fn check_enum(
     report: &mut ValidationReport<'_>,
     path: impl FnOnce() -> String,
@@ -659,7 +711,7 @@ fn check_iso_currency(
     report.warn(
         path(),
         span,
-        format!("currency {value:?} is not a 3-letter ISO 4217 code"),
+        format!("currency {value:?} is not shaped like a 3-letter ISO 4217 code"),
     );
 }
 
@@ -679,7 +731,7 @@ fn check_iso_country(
     report.warn(
         path(),
         span,
-        format!("country {trimmed:?} is not a 2-letter ISO 3166-1 alpha-2 code"),
+        format!("country {trimmed:?} is not shaped like a 2-letter ISO 3166-1 alpha-2 code"),
     );
 }
 
@@ -699,7 +751,7 @@ fn check_iso_datetime(
     report.warn(
         path(),
         span,
-        format!("date {trimmed:?} is not ISO 8601 datetime"),
+        format!("date {trimmed:?} is not in the supported ISO 8601 datetime shape"),
     );
 }
 
@@ -731,10 +783,30 @@ fn is_iso_datetime(value: &str) -> bool {
         {
             return false;
         }
+        if !valid_date_time_fields(
+            number(&bytes[0..4]),
+            number(&bytes[5..7]),
+            number(&bytes[8..10]),
+            number(&bytes[11..13]),
+            number(&bytes[14..16]),
+            number(&bytes[17..19]),
+        ) {
+            return false;
+        }
         check_offset(&bytes[19..], true)
     } else {
         // CCYYMMDDThhmmss with optional fractional + offset
         if !ascii_digits(&bytes[0..8]) || bytes[8] != b'T' || !ascii_digits(&bytes[9..15]) {
+            return false;
+        }
+        if !valid_date_time_fields(
+            number(&bytes[0..4]),
+            number(&bytes[4..6]),
+            number(&bytes[6..8]),
+            number(&bytes[9..11]),
+            number(&bytes[11..13]),
+            number(&bytes[13..15]),
+        ) {
             return false;
         }
         check_offset(&bytes[15..], false)
@@ -768,8 +840,11 @@ fn check_offset(rest: &[u8], extended: bool) -> bool {
                     && ascii_digits(&remainder[0..2])
                     && remainder[2] == b':'
                     && ascii_digits(&remainder[3..5])
+                    && valid_offset(number(&remainder[0..2]), number(&remainder[3..5]))
             } else {
-                remainder.len() == 4 && ascii_digits(remainder)
+                remainder.len() == 4
+                    && ascii_digits(remainder)
+                    && valid_offset(number(&remainder[0..2]), number(&remainder[2..4]))
             }
         }
         _ => false,
@@ -778,6 +853,45 @@ fn check_offset(rest: &[u8], extended: bool) -> bool {
 
 fn ascii_digits(bytes: &[u8]) -> bool {
     !bytes.is_empty() && bytes.iter().all(|b| b.is_ascii_digit())
+}
+
+fn number(bytes: &[u8]) -> u32 {
+    bytes
+        .iter()
+        .fold(0_u32, |value, byte| value * 10 + u32::from(byte - b'0'))
+}
+
+fn valid_date_time_fields(
+    year: u32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+) -> bool {
+    (1..=12).contains(&month)
+        && (1..=days_in_month(year, month)).contains(&day)
+        && hour <= 23
+        && minute <= 59
+        && second <= 59
+}
+
+fn days_in_month(year: u32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn is_leap_year(year: u32) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+fn valid_offset(hour: u32, minute: u32) -> bool {
+    hour <= 23 && minute <= 59
 }
 
 impl<'a> ValidationReport<'a> {

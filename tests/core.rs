@@ -1,6 +1,6 @@
 use adf::{
-    AdfDocument, DEFAULT_MAX_DOCTYPE_LEN, Error, ParseOptions, Severity, TextPart,
-    ValidationOptions, ValidationReport, XmlNode, parse, parse_with,
+    AdfDocument, Attribute, DEFAULT_MAX_DOCTYPE_LEN, Error, ParseOptions, Severity, Span, TextPart,
+    ValidationOptions, ValidationReport, XmlElement, XmlNode, parse, parse_with,
 };
 use insta::assert_snapshot;
 use pretty_assertions::assert_eq;
@@ -320,6 +320,23 @@ fn rejects_non_whitespace_content_outside_root() {
 }
 
 #[test]
+fn rejects_non_adf_root() {
+    assert!(matches!(
+        parse("<not-adf />"),
+        Err(Error::UnexpectedRoot { found, .. }) if found == "not-adf"
+    ));
+}
+
+#[test]
+fn rejects_invalid_xml_comments() {
+    assert!(parse("<adf><!--bad--comment--><prospect /></adf>").is_err());
+    assert!(
+        parse("<adf><prospect><customer><contact><name><!--bad--comment--></name></contact></customer></prospect></adf>")
+            .is_err()
+    );
+}
+
+#[test]
 fn decodes_numeric_character_references() {
     let doc = parse(
         r#"<adf><prospect><customer><contact><name>&#65;&#x42; &amp; Co</name></contact></customer></prospect></adf>"#,
@@ -332,6 +349,45 @@ fn decodes_numeric_character_references() {
         "decodes_numeric_character_references",
         doc.to_typed_string().unwrap()
     );
+}
+
+#[test]
+fn rejects_xml_illegal_character_references_and_text() {
+    let nul_ref = r#"<adf><prospect><customer><contact><name>&#0;</name></contact></customer></prospect></adf>"#;
+    assert!(matches!(
+        parse(nul_ref),
+        Err(Error::InvalidCharacterReference { .. })
+    ));
+
+    let direct_control = format!(
+        "<adf><prospect><customer><contact><name>A{}B</name></contact></customer></prospect></adf>",
+        char::from_u32(1).unwrap()
+    );
+    assert!(matches!(
+        parse(&direct_control),
+        Err(Error::IllegalCharacter { .. })
+    ));
+}
+
+#[test]
+fn rejects_malformed_entity_reference_names() {
+    let bad_text = r#"<adf><prospect><customer><contact><name>&bad ref;</name></contact></customer></prospect></adf>"#;
+    assert!(matches!(
+        parse(bad_text),
+        Err(Error::InvalidEntityReference { .. })
+    ));
+
+    let empty_text = r#"<adf><prospect><customer><contact><name>&;</name></contact></customer></prospect></adf>"#;
+    assert!(matches!(
+        parse(empty_text),
+        Err(Error::InvalidEntityReference { .. })
+    ));
+
+    let bad_attr = r#"<adf><prospect status="&bad ref;" /></adf>"#;
+    assert!(matches!(
+        parse(bad_attr),
+        Err(Error::InvalidEntityReference { .. })
+    ));
 }
 
 #[test]
@@ -421,7 +477,7 @@ fn broad_adf_mutation_uses_typed_writer() {
 
     let output = doc.to_original_preserving_string().unwrap();
 
-    assert!(!output.contains("<!-- keep me -->"));
+    assert!(output.contains("<!-- keep me -->"));
     assert_snapshot!("broad_adf_mutation_uses_typed_writer", output);
 }
 
@@ -532,6 +588,24 @@ fn typed_writer_preserves_embedded_partner_xml_in_text_elements() {
 }
 
 #[test]
+fn typed_writer_preserves_non_element_container_extensions() {
+    let input = r#"<adf><prospect><!--prospect note--><?partner keep?><vehicle><year>2024</year><!--vehicle note--><make>Honda</make><model>Civic</model></vehicle><customer><contact><name part="full">A</name><email>a@example.com</email></contact></customer></prospect></adf>"#;
+    let mut doc = parse(input).expect("valid ADF should parse");
+
+    let typed = doc.to_typed_string().unwrap();
+    assert!(typed.contains("<!--prospect note-->"));
+    assert!(typed.contains("<?partner keep?>"));
+    assert!(typed.contains("<!--vehicle note-->"));
+    parse(&typed).expect("typed XML should reparse");
+
+    doc.prospect_mut(0).unwrap().status = Some(Cow::Borrowed("resend"));
+    let localized = doc.to_original_preserving_string().unwrap();
+    assert!(localized.contains("<!--prospect note-->"));
+    assert!(localized.contains("<?partner keep?>"));
+    assert!(localized.contains("<!--vehicle note-->"));
+}
+
+#[test]
 fn typed_writer_keeps_extensions_near_original_dtd_slot() {
     let input = r#"<adf><prospect><vehicle><year>2024</year><partner-score>97</partner-score><make>Honda</make><model>Civic</model></vehicle><customer><contact><name part="full">A</name><email>a@example.com</email></contact></customer></prospect></adf>"#;
     let doc = parse(input).expect("valid ADF should parse");
@@ -596,6 +670,52 @@ fn typed_writer_splits_cdata_containing_terminator() {
 }
 
 #[test]
+fn typed_writer_rejects_invalid_public_xml_tokens() {
+    let mut doc = parse("<adf><prospect /></adf>").expect("valid ADF should parse");
+    doc.adf_mut()
+        .extensions
+        .push(XmlNode::Comment(Cow::Borrowed("bad--comment")));
+    assert!(matches!(
+        doc.to_typed_string(),
+        Err(Error::InvalidXmlToken {
+            kind: "comment",
+            ..
+        })
+    ));
+
+    let mut doc = parse("<adf><prospect /></adf>").expect("valid ADF should parse");
+    doc.adf_mut()
+        .extensions
+        .push(XmlNode::EntityRef(Cow::Borrowed("bad ref")));
+    assert!(matches!(
+        doc.to_typed_string(),
+        Err(Error::InvalidEntityReference { .. })
+    ));
+
+    let mut doc = parse("<adf><prospect /></adf>").expect("valid ADF should parse");
+    doc.adf_mut().extensions.push(XmlNode::Element(XmlElement {
+        name: Cow::Borrowed("bad name"),
+        attributes: Vec::new(),
+        children: Vec::new(),
+        span: Span::default(),
+    }));
+    assert!(matches!(
+        doc.to_typed_string(),
+        Err(Error::InvalidName { kind: "element" })
+    ));
+
+    let mut doc = parse("<adf><prospect /></adf>").expect("valid ADF should parse");
+    doc.adf_mut().attributes.push(Attribute {
+        name: Cow::Borrowed("bad attr"),
+        value: Cow::Borrowed("value"),
+    });
+    assert!(matches!(
+        doc.to_typed_string(),
+        Err(Error::InvalidName { kind: "attribute" })
+    ));
+}
+
+#[test]
 fn validate_strict_promotes_required_fields_to_errors() {
     let input = r#"<adf><prospect><customer><contact /></customer></prospect></adf>"#;
     let doc = parse(input).expect("valid ADF should parse");
@@ -631,6 +751,56 @@ fn validate_warns_on_bad_iso_formats() {
 
     assert_snapshot!(
         "validate_warns_on_bad_iso_formats",
+        normalized_issues(input, &report)
+    );
+}
+
+#[test]
+fn validate_strict_keeps_bad_enum_values_as_warnings() {
+    let input = r#"<adf><prospect status="weird"><requestdate>2024-01-02T03:04:05-05:00</requestdate><vehicle interest="loan" status="brand-new"><year>2024</year><make>X</make><model>Y</model><price type="bizarre" currency="USD">1</price></vehicle><customer><contact><name part="full">A</name><email>a@example.com</email></contact></customer><vendor><vendorname>V</vendorname><contact><name part="full">B</name><email>b@example.com</email></contact></vendor></prospect></adf>"#;
+    let doc = parse(input).expect("valid ADF should parse");
+    let report = doc.validate_strict();
+
+    assert!(report.is_valid());
+    assert!(
+        report
+            .issues
+            .iter()
+            .all(|issue| issue.severity == Severity::Warning)
+    );
+    assert_snapshot!(
+        "validate_strict_keeps_bad_enum_values_as_warnings",
+        normalized_issues(input, &report)
+    );
+}
+
+#[test]
+fn validate_strict_keeps_bad_iso_shapes_as_warnings() {
+    let input = r#"<adf><prospect><requestdate>9999-99-99T99:99:99</requestdate><vehicle><year>2024</year><make>X</make><model>Y</model><price type="quote" currency="usd">1</price></vehicle><customer><contact><name part="full">A</name><email>a@example.com</email><address type="home"><country>USA</country></address></contact></customer><vendor><vendorname>V</vendorname><contact><name part="full">B</name><email>b@example.com</email></contact></vendor></prospect></adf>"#;
+    let doc = parse(input).expect("valid ADF should parse");
+    let report = doc.validate_strict();
+
+    assert!(report.is_valid());
+    assert!(
+        report
+            .issues
+            .iter()
+            .all(|issue| issue.severity == Severity::Warning)
+    );
+    assert_snapshot!(
+        "validate_strict_keeps_bad_iso_shapes_as_warnings",
+        normalized_issues(input, &report)
+    );
+}
+
+#[test]
+fn validate_checks_provider_contacts_and_direct_contact_fields() {
+    let input = r#"<adf><prospect><requestdate>2024-01-02T03:04:05-05:00</requestdate><vehicle><year>2024</year><make>X</make><model>Y</model></vehicle><customer><contact><name part="full">A</name><email>a@example.com</email></contact></customer><vendor><vendorname>V</vendorname><contact><name part="full">B</name><email>b@example.com</email></contact></vendor><provider><email preferredcontact="yes">p@example.com</email><phone type="sms" time="never" preferredcontact="maybe">555</phone><contact primarycontact="yes"><phone type="sms">555</phone></contact></provider></prospect></adf>"#;
+    let doc = parse(input).expect("valid ADF should parse");
+    let report = doc.validate_strict();
+
+    assert_snapshot!(
+        "validate_checks_provider_contacts_and_direct_contact_fields",
         normalized_issues(input, &report)
     );
 }
@@ -779,6 +949,20 @@ fn empty_adf_issue_span_covers_root_element() {
 }
 
 #[test]
+fn empty_adf_uses_lenient_and_strict_severity() {
+    let input = "<adf></adf>";
+    let doc = parse(input).expect("valid ADF should parse");
+
+    let lenient = doc.validate();
+    assert!(lenient.is_valid());
+    assert_eq!(lenient.issues[0].severity, Severity::Warning);
+
+    let strict = doc.validate_strict();
+    assert!(!strict.is_valid());
+    assert_eq!(strict.issues[0].severity, Severity::Error);
+}
+
+#[test]
 fn performance_invariant_parser_borrows_element_names_for_ascii_input() {
     let input = r#"<adf><prospect><vehicle><year>2024</year></vehicle></prospect></adf>"#;
     let doc = parse(input).expect("valid ADF should parse");
@@ -836,8 +1020,8 @@ fn reject_doctype_option_errors_on_dtd() {
 
 #[test]
 fn default_doctype_length_cap_rejects_entity_bomb() {
-    // A DTD internal subset large enough to exceed the default cap, e.g. a
-    // billion-laughs style entity definition block.
+    // A DOCTYPE payload large enough to exceed the default cap, e.g. a
+    // billion-laughs style entity definition block in an internal subset.
     let bomb = format!(
         "<!DOCTYPE adf [ {} ]>\n<adf><prospect /></adf>",
         "<!ENTITY a \"aaaaaaaaaa\">".repeat(400)
@@ -856,14 +1040,14 @@ fn default_doctype_length_cap_rejects_entity_bomb() {
 fn doctype_length_cap_is_configurable() {
     let input = "<!DOCTYPE adf [ <!ENTITY x \"value\"> ]>\n<adf><prospect /></adf>";
 
-    // A tiny cap rejects an otherwise harmless internal subset.
+    // A tiny cap rejects an otherwise harmless DOCTYPE payload.
     let tight = ParseOptions::default().max_doctype_len(4);
     assert!(matches!(
         parse_with(input, &tight),
         Err(Error::DocTypeTooLong { limit: 4, .. })
     ));
 
-    // Disabling the cap accepts an arbitrarily large internal subset.
+    // Disabling the cap accepts an arbitrarily large DOCTYPE payload.
     let unlimited = ParseOptions::default().without_doctype_limit();
     let huge = format!(
         "<!DOCTYPE adf [ {} ]>\n<adf><prospect /></adf>",
@@ -888,6 +1072,29 @@ fn custom_entities_are_never_expanded() {
     assert_snapshot!(
         "custom_entities_are_never_expanded",
         doc.to_typed_string().unwrap()
+    );
+}
+
+#[test]
+fn custom_entities_in_attributes_are_preserved_as_literal_text() {
+    let input = concat!(
+        "<!DOCTYPE adf [ <!ENTITY custom \"resend\"> ]>\n",
+        "<adf><prospect status=\"&custom;\" /></adf>"
+    );
+    let doc = parse(input).expect("custom attribute entity should parse without expansion");
+
+    assert_eq!(doc.adf().prospects[0].status.as_deref(), Some("&custom;"));
+    assert_eq!(doc.to_original_preserving_string().unwrap(), input);
+
+    let typed = doc.to_typed_string().unwrap();
+    assert!(
+        typed.contains(r#"status="&amp;custom;""#),
+        "typed writer should escape the literal preserved reference: {typed}"
+    );
+    let reparsed = parse(&typed).expect("typed XML should reparse");
+    assert_eq!(
+        reparsed.adf().prospects[0].status.as_deref(),
+        Some("&custom;")
     );
 }
 

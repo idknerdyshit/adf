@@ -8,10 +8,10 @@ This crate is aimed at low-overhead ADF processing:
 - borrows input text where possible through `Cow<'a, str>`
 - exposes a typed ADF model for common lead fields
 - keeps unknown XML elements and attributes — on containers and compact elements alike — instead of discarding partner data
-- preserves CDATA wrappers and unknown entity references through the typed writer
+- preserves CDATA wrappers and unknown text entity references through the typed writer
 - can write the original document byte-for-byte when it has not been changed
 - can rewrite only dirty prospect spans for localized edits
-- keeps ADF-specific validation separate from XML parsing, with optional strict mode plus DTD enum and ISO format checks
+- keeps ADF-specific validation separate from XML parsing, with optional strict mode plus DTD enum and lightweight ISO-like format checks
 - never resolves external entities or expands custom ones, and bounds (or rejects) `<!DOCTYPE>` declarations to keep untrusted input safe
 
 ## Installation
@@ -57,15 +57,15 @@ fn main() -> Result<(), adf::Error> {
 
 `AdfDocument::to_original_preserving_string()` preserves the original XML when the document is clean. If a single prospect is modified through `prospect_mut`, only that prospect's original byte span is rewritten and the surrounding XML is copied through unchanged.
 
-`AdfDocument::to_typed_string()` writes normalized ADF XML from the typed model. This is useful when broad structural edits are made through `adf_mut`, or when normalized output is preferred over preserving original formatting.
+`AdfDocument::to_typed_string()` writes normalized ADF XML from the typed model. This is useful when broad structural edits are made through `adf_mut`, or when normalized output is preferred over preserving original formatting. Non-element extension nodes such as comments, processing instructions, CDATA, and custom entity references are preserved, but only element extensions carry source spans for relative ordering around typed children.
 
 `AdfDocument::root()` exposes the raw XML tree for callers that need it. The tree is parsed lazily on first access so typed-only processing does not retain both the full raw tree and the typed ADF model.
 
 ## Parsing Safety
 
-The parser never resolves external entities and never expands custom (DTD-defined) entities: only the five predefined XML entities and numeric character references are substituted, and any other reference is preserved verbatim. This makes classic XXE and entity-expansion ("billion laughs") attacks structurally impossible.
+The parser never resolves external entities and never expands custom (DTD-defined) entities: only the five predefined XML entities and legal numeric character references are substituted. Unknown references in text are preserved as entity-reference parts. Unknown references in attributes are kept as literal `&name;` text; normalized typed output escapes those ampersands because attributes are modeled as flat strings. This makes classic XXE and entity-expansion ("billion laughs") attacks structurally impossible.
 
-`parse` keeps `<!DOCTYPE>` declarations so partner documents round-trip, but caps the internal subset at `DEFAULT_MAX_DOCTYPE_LEN` (4096 bytes) by default. Use `parse_with` and `ParseOptions` to tighten or relax this:
+`parse` keeps `<!DOCTYPE>` declarations so partner documents round-trip, but caps the declaration payload at `DEFAULT_MAX_DOCTYPE_LEN` (4096 bytes) by default. Use `parse_with` and `ParseOptions` to tighten or relax this:
 
 ```rust
 use adf::{parse_with, ParseOptions};
@@ -85,7 +85,7 @@ fn main() -> Result<(), adf::Error> {
 
 ## Validation
 
-Parsing only requires well-formed XML. ADF-specific checks are available through `AdfDocument::validate()`:
+Parsing requires well-formed XML rooted at `<adf>`. ADF-specific content checks are available through `AdfDocument::validate()`:
 
 ```rust
 fn main() -> Result<(), adf::Error> {
@@ -99,9 +99,9 @@ fn main() -> Result<(), adf::Error> {
 }
 ```
 
-The default validator reports DTD-required elements as warnings, checks DTD enumerated attribute values (`prospect@status`, `vehicle@interest`, `price@type`, etc.), and warns on malformed ISO 8601 dates, ISO 4217 currency codes, and ISO 3166 country codes.
+The default validator reports DTD-required elements as warnings, checks DTD enumerated attribute values (`prospect@status`, `vehicle@interest`, `price@type`, etc.), and warns on unsupported ISO 8601 datetime shapes plus malformed ISO 4217/ISO 3166 code shapes. It does not attempt full registry validation for every currency or country code.
 
-`AdfDocument::validate_strict()` (or `validate_with(adf, ValidationOptions::default().strict(true))`) promotes the "missing required element" warnings to errors, suitable for gating on conformance.
+`AdfDocument::validate_strict()` (or `validate_with(adf, ValidationOptions::default().strict(true))`) promotes the "missing required element" warnings to errors, suitable for gating on this crate's structural checks. Enum and date/country/currency shape issues remain warnings in strict mode.
 
 ## Logging and Tracing
 

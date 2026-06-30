@@ -36,13 +36,16 @@ pub use validate::{
 
 /// Parse an ADF-XML document with the default [`ParseOptions`].
 ///
-/// Inputs must be well-formed XML. ADF-specific validation is intentionally
-/// separate and can be requested through [`AdfDocument::validate`].
+/// Inputs must be well-formed XML rooted at `<adf>`. Other ADF-specific
+/// validation is intentionally separate and can be requested through
+/// [`AdfDocument::validate`].
 ///
 /// External and custom entities are never resolved or expanded: the parser
-/// only substitutes the five predefined XML entities and numeric character
-/// references, leaving any other entity reference intact. By default a
-/// `<!DOCTYPE …>` declaration is preserved but its internal subset is capped at
+/// only substitutes the five predefined XML entities and legal numeric
+/// character references. Unknown entity references in text are retained as
+/// [`TextPart::EntityRef`]; unknown entity references in attributes are kept as
+/// literal `&name;` text because [`Attribute`] stores a flat string. By default
+/// a `<!DOCTYPE …>` declaration is preserved but its payload is capped at
 /// [`DEFAULT_MAX_DOCTYPE_LEN`] bytes; use [`parse_with`] to reject DOCTYPEs
 /// outright or to change the limit.
 pub fn parse(input: &str) -> Result<AdfDocument<'_>> {

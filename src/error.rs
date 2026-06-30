@@ -1,51 +1,69 @@
 use std::fmt;
 
+/// Crate result type.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Errors returned by parsing, validation-adjacent parsing checks, and writing.
 #[derive(Debug)]
 pub enum Error {
+    /// XML syntax or well-formedness error reported by the XML reader.
     Xml {
         position: u64,
         source: quick_xml::Error,
     },
+    /// XML attribute syntax error reported while reading a start tag.
     Attribute {
         position: u64,
         source: quick_xml::events::attributes::AttrError,
     },
+    /// Character encoding error while decoding XML event content.
     Encoding {
         position: u64,
         source: quick_xml::encoding::EncodingError,
     },
+    /// UTF-8 decoding error for XML names or event payloads.
     Utf8 {
         position: u64,
         source: std::str::Utf8Error,
     },
+    /// Closing tag did not match the currently open element.
     MismatchedEnd {
         expected: String,
         found: String,
         position: u64,
     },
-    UnexpectedEnd {
-        name: String,
-        position: u64,
+    /// Closing tag appeared without a matching open element.
+    UnexpectedEnd { name: String, position: u64 },
+    /// Non-whitespace content appeared before or after the document root.
+    ContentOutsideRoot { position: u64 },
+    /// XML root element was not `<adf>`.
+    UnexpectedRoot { found: String, position: u64 },
+    /// A numeric character reference could not be decoded to an XML character.
+    InvalidCharacterReference { reference: String, position: u64 },
+    /// An entity reference was malformed.
+    InvalidEntityReference { reference: String, position: u64 },
+    /// XML text contained a Unicode scalar value that XML does not permit.
+    IllegalCharacter { character: char, position: u64 },
+    /// XML name token was invalid for the context.
+    InvalidName { kind: &'static str },
+    /// Caller-constructed raw XML node content was not syntactically valid.
+    InvalidXmlToken {
+        kind: &'static str,
+        reason: &'static str,
     },
-    ContentOutsideRoot {
-        position: u64,
-    },
-    InvalidCharacterReference {
-        reference: String,
-        position: u64,
-    },
-    DocTypeForbidden {
-        position: u64,
-    },
+    /// A DOCTYPE declaration was rejected by [`crate::ParseOptions`].
+    DocTypeForbidden { position: u64 },
+    /// A DOCTYPE declaration exceeded the configured byte limit.
     DocTypeTooLong {
         length: usize,
         limit: usize,
         position: u64,
     },
+    /// No XML root element was found.
     MissingRoot,
+    /// More than one XML root element was found.
     MultipleRoots,
+    /// Error returned by an output writer.
     Io(std::io::Error),
 }
 
@@ -91,6 +109,12 @@ impl fmt::Display for Error {
                     "non-document content outside the root element at byte {position}"
                 )
             }
+            Error::UnexpectedRoot { found, position } => {
+                write!(
+                    f,
+                    "unexpected root element <{found}> at byte {position}; expected <adf>"
+                )
+            }
             Error::InvalidCharacterReference {
                 reference,
                 position,
@@ -99,6 +123,27 @@ impl fmt::Display for Error {
                     f,
                     "invalid XML character reference &{reference}; at byte {position}"
                 )
+            }
+            Error::InvalidEntityReference {
+                reference,
+                position,
+            } => {
+                write!(
+                    f,
+                    "invalid XML entity reference &{reference}; at byte {position}"
+                )
+            }
+            Error::IllegalCharacter {
+                character,
+                position,
+            } => write!(
+                f,
+                "illegal XML character U+{:04X} at byte {position}",
+                *character as u32
+            ),
+            Error::InvalidName { kind } => write!(f, "invalid XML {kind} name"),
+            Error::InvalidXmlToken { kind, reason } => {
+                write!(f, "invalid XML {kind}: {reason}")
             }
             Error::DocTypeForbidden { position } => {
                 write!(f, "DOCTYPE declaration is not allowed at byte {position}")

@@ -5,38 +5,71 @@ use std::cell::OnceCell;
 use std::io::Write;
 use std::ops::Range;
 
+/// Byte span into the original XML input.
+///
+/// A default span (`0..0`) means the value was constructed by the caller or no
+/// source location is available.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Span {
+    /// Start byte offset in the original XML input.
     pub start: usize,
+    /// End byte offset in the original XML input.
     pub end: usize,
 }
 
+/// XML attribute name/value pair preserved from input or built by callers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attribute<'a> {
+    /// Attribute name, including any namespace prefix as written.
     pub name: Cow<'a, str>,
+    /// Decoded attribute value.
+    ///
+    /// Standard XML entities and character references are decoded. Unknown
+    /// entity references are preserved as literal `&name;` text because the
+    /// public attribute model has no separate entity-reference variant.
     pub value: Cow<'a, str>,
 }
 
+/// Raw XML element used for extension content and [`AdfDocument::root`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XmlElement<'a> {
+    /// Element name, including any namespace prefix as written.
     pub name: Cow<'a, str>,
+    /// Element attributes.
     pub attributes: Vec<Attribute<'a>>,
+    /// Raw child nodes.
     pub children: Vec<XmlNode<'a>>,
+    /// Byte span covering the complete element in the original input.
     pub span: Span,
 }
 
+/// Raw XML node retained for extension and mixed-content round-tripping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum XmlNode<'a> {
+    /// Nested XML element.
     Element(XmlElement<'a>),
+    /// Text content with standard XML entities decoded.
     Text(Cow<'a, str>),
+    /// CDATA content without the wrapper.
     CData(Cow<'a, str>),
+    /// Unresolved named entity reference, stored without `&` and `;`.
     EntityRef(Cow<'a, str>),
+    /// XML comment content without `<!--` and `-->`.
     Comment(Cow<'a, str>),
+    /// Processing-instruction content without `<?` and `?>`.
     ProcessingInstruction(Cow<'a, str>),
+    /// XML declaration content without `<?` and `?>`.
     Declaration(Cow<'a, str>),
+    /// DOCTYPE payload without `<!DOCTYPE` and `>`.
     DocType(Cow<'a, str>),
 }
 
+/// Parsed ADF document plus original-input preservation state.
+///
+/// Mutating through [`AdfDocument::prospect_mut`] marks a single prospect dirty
+/// so original-preserving writes can replace only that byte span. Mutating
+/// through [`AdfDocument::adf_mut`] marks the whole document dirty and causes
+/// original-preserving writes to fall back to normalized typed output.
 #[derive(Debug, Clone)]
 pub struct AdfDocument<'a> {
     pub(crate) original: &'a str,
@@ -67,6 +100,7 @@ impl<'a> AdfDocument<'a> {
         }
     }
 
+    /// Return the exact XML input used to create this document.
     pub fn original(&self) -> &'a str {
         self.original
     }
@@ -89,16 +123,19 @@ impl<'a> AdfDocument<'a> {
         })
     }
 
+    /// Return the typed ADF model.
     pub fn adf(&self) -> &Adf<'a> {
         &self.adf
     }
 
+    /// Mutably access the typed ADF model and mark the whole document dirty.
     pub fn adf_mut(&mut self) -> &mut Adf<'a> {
         self.dirty_all = true;
         tracing::trace!("marked full ADF document dirty");
         &mut self.adf
     }
 
+    /// Mutably access one prospect and mark only that prospect dirty.
     pub fn prospect_mut(&mut self, index: usize) -> Option<&mut Prospect<'a>> {
         let found = index < self.adf.prospects.len();
         if let Some(dirty) = self.dirty_prospects.get_mut(index) {
@@ -108,18 +145,25 @@ impl<'a> AdfDocument<'a> {
         self.adf.prospects.get_mut(index)
     }
 
+    /// Return whether any mutation path has marked the document dirty.
     pub fn is_dirty(&self) -> bool {
         self.dirty_all || self.dirty_prospects.iter().any(|dirty| *dirty)
     }
 
+    /// Validate the typed ADF model using lenient default options.
     pub fn validate(&self) -> validate::ValidationReport<'a> {
         validate::validate(&self.adf)
     }
 
+    /// Validate the typed ADF model with strict structural requirements.
+    ///
+    /// Strict mode promotes missing required structure to errors. Enum and
+    /// lightweight format issues remain warnings.
     pub fn validate_strict(&self) -> validate::ValidationReport<'a> {
         validate::validate_with(&self.adf, validate::ValidationOptions { strict: true })
     }
 
+    /// Write XML while preserving unchanged original input where possible.
     pub fn write_original_preserving<W: Write>(&self, writer: W) -> Result<()> {
         let span = tracing::debug_span!(
             "adf.write.original_preserving",
@@ -153,6 +197,10 @@ impl<'a> AdfDocument<'a> {
         }
     }
 
+    /// Write normalized XML from the typed ADF model.
+    ///
+    /// Non-element extension nodes are preserved, but only element extensions
+    /// carry source spans for relative ordering around typed children.
     pub fn write_typed<W: Write>(&self, writer: W) -> Result<()> {
         let span = tracing::debug_span!("adf.write.typed");
         let _span_guard = span.enter();
@@ -179,6 +227,7 @@ impl<'a> AdfDocument<'a> {
         }
     }
 
+    /// Return [`AdfDocument::write_original_preserving`] output as a string.
     pub fn to_original_preserving_string(&self) -> Result<String> {
         let mut bytes = Vec::new();
         self.write_original_preserving(&mut bytes)?;
@@ -189,6 +238,7 @@ impl<'a> AdfDocument<'a> {
         Ok(String::from_utf8(bytes).expect("ADF writer only emits UTF-8"))
     }
 
+    /// Return [`AdfDocument::write_typed`] output as a string.
     pub fn to_typed_string(&self) -> Result<String> {
         let mut bytes = Vec::new();
         self.write_typed(&mut bytes)?;
