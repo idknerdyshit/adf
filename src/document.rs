@@ -77,6 +77,8 @@ pub struct AdfDocument<'a> {
     pub(crate) raw_root: OnceCell<XmlElement<'a>>,
     pub(crate) adf: Adf<'a>,
     pub(crate) prospect_spans: Vec<Range<usize>>,
+    pub(crate) prolog: Vec<XmlNode<'a>>,
+    pub(crate) epilog: Vec<XmlNode<'a>>,
     pub(crate) dirty_prospects: Vec<bool>,
     pub(crate) dirty_all: bool,
 }
@@ -87,6 +89,8 @@ impl<'a> AdfDocument<'a> {
         parse_options: ParseOptions,
         adf: Adf<'a>,
         prospect_spans: Vec<Range<usize>>,
+        prolog: Vec<XmlNode<'a>>,
+        epilog: Vec<XmlNode<'a>>,
     ) -> Self {
         let dirty_prospects = vec![false; prospect_spans.len()];
         Self {
@@ -95,6 +99,8 @@ impl<'a> AdfDocument<'a> {
             raw_root: OnceCell::new(),
             adf,
             prospect_spans,
+            prolog,
+            epilog,
             dirty_prospects,
             dirty_all: false,
         }
@@ -205,7 +211,7 @@ impl<'a> AdfDocument<'a> {
         let span = tracing::debug_span!("adf.write.typed");
         let _span_guard = span.enter();
 
-        match crate::write::write_adf(writer, &self.adf) {
+        match crate::write::write_adf(writer, &self.adf, &self.prolog, &self.epilog) {
             Ok(()) => {
                 if tracing::enabled!(tracing::Level::DEBUG) {
                     let stats = crate::trace::DocumentStats::from_adf(&self.adf);

@@ -78,14 +78,14 @@ pub(crate) fn parse_with<'a>(input: &'a str, options: &ParseOptions) -> Result<A
     );
     let _span_guard = span.enter();
 
-    let root = match parse_tree(input, options) {
-        Ok(root) => root,
+    let document_tree = match parse_document_tree(input, options) {
+        Ok(document_tree) => document_tree,
         Err(error) => {
             crate::trace::record_error("parse", &error);
             return Err(error);
         }
     };
-    let (adf, prospect_spans) = adf_from_root(root)?;
+    let (adf, prospect_spans) = adf_from_root(document_tree.root)?;
     if tracing::enabled!(tracing::Level::DEBUG) {
         let stats = crate::trace::DocumentStats::from_adf(&adf);
         tracing::debug!(
@@ -97,10 +97,27 @@ pub(crate) fn parse_with<'a>(input: &'a str, options: &ParseOptions) -> Result<A
             "ADF parse complete"
         );
     }
-    Ok(AdfDocument::new(input, *options, adf, prospect_spans))
+    Ok(AdfDocument::new(
+        input,
+        *options,
+        adf,
+        prospect_spans,
+        document_tree.prolog,
+        document_tree.epilog,
+    ))
 }
 
 pub(crate) fn parse_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<XmlElement<'a>> {
+    Ok(parse_document_tree(input, options)?.root)
+}
+
+struct DocumentTree<'a> {
+    root: XmlElement<'a>,
+    prolog: Vec<XmlNode<'a>>,
+    epilog: Vec<XmlNode<'a>>,
+}
+
+fn parse_document_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<DocumentTree<'a>> {
     let mut reader = Reader::from_str(input);
     {
         let config = reader.config_mut();
@@ -109,6 +126,8 @@ pub(crate) fn parse_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<X
     }
     let mut stack: Vec<XmlElement<'_>> = Vec::new();
     let mut root: Option<XmlElement<'_>> = None;
+    let mut prolog = Vec::new();
+    let mut epilog = Vec::new();
 
     loop {
         let event_start = reader.buffer_position() as usize;
@@ -160,14 +179,28 @@ pub(crate) fn parse_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<X
                     .xml_content()
                     .map_err(|source| Error::encoding(position, source))?;
                 ensure_xml_chars(&text, position)?;
-                append_node(&mut stack, root.is_some(), XmlNode::Text(text), position)?;
+                append_node(
+                    &mut stack,
+                    root.is_some(),
+                    XmlNode::Text(text),
+                    position,
+                    &mut prolog,
+                    &mut epilog,
+                )?;
             }
             Event::CData(cdata) => {
                 let cdata = cdata
                     .decode()
                     .map_err(|source| Error::encoding(position, source))?;
                 ensure_xml_chars(&cdata, position)?;
-                append_node(&mut stack, root.is_some(), XmlNode::CData(cdata), position)?;
+                append_node(
+                    &mut stack,
+                    root.is_some(),
+                    XmlNode::CData(cdata),
+                    position,
+                    &mut prolog,
+                    &mut epilog,
+                )?;
             }
             Event::Comment(comment) => {
                 let comment = comment
@@ -179,6 +212,8 @@ pub(crate) fn parse_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<X
                     root.is_some(),
                     XmlNode::Comment(comment),
                     position,
+                    &mut prolog,
+                    &mut epilog,
                 )?;
             }
             Event::PI(pi) => append_node(
@@ -189,12 +224,16 @@ pub(crate) fn parse_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<X
                     position,
                 )?)),
                 position,
+                &mut prolog,
+                &mut epilog,
             )?,
             Event::Decl(decl) => append_node(
                 &mut stack,
                 root.is_some(),
                 XmlNode::Declaration(Cow::Owned(validated_name_payload(decl.as_ref(), position)?)),
                 position,
+                &mut prolog,
+                &mut epilog,
             )?,
             Event::DocType(doc_type) => {
                 if options.reject_doctype {
@@ -222,6 +261,8 @@ pub(crate) fn parse_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<X
                     root.is_some(),
                     XmlNode::DocType(decoded),
                     position,
+                    &mut prolog,
+                    &mut epilog,
                 )?;
             }
             Event::GeneralRef(general_ref) => {
@@ -236,6 +277,8 @@ pub(crate) fn parse_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<X
                     root.is_some(),
                     general_ref_node(entity, position)?,
                     position,
+                    &mut prolog,
+                    &mut epilog,
                 )?;
             }
             Event::Eof => break,
@@ -249,7 +292,11 @@ pub(crate) fn parse_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<X
         });
     }
 
-    root.ok_or(Error::MissingRoot)
+    Ok(DocumentTree {
+        root: root.ok_or(Error::MissingRoot)?,
+        prolog,
+        epilog,
+    })
 }
 
 fn element_from_start<'a>(
@@ -303,6 +350,8 @@ fn append_node<'a>(
     has_root: bool,
     node: XmlNode<'a>,
     position: u64,
+    prolog: &mut Vec<XmlNode<'a>>,
+    epilog: &mut Vec<XmlNode<'a>>,
 ) -> Result<()> {
     if let Some(parent) = stack.last_mut() {
         parent.children.push(node);
@@ -310,6 +359,11 @@ fn append_node<'a>(
     }
 
     if is_document_misc(&node, has_root) {
+        if has_root {
+            epilog.push(node);
+        } else {
+            prolog.push(node);
+        }
         return Ok(());
     }
 
@@ -604,11 +658,31 @@ fn prospect_from_element<'a>(element: XmlElement<'a>) -> Prospect<'a> {
         };
         match child.name.as_ref() {
             "id" => prospect.ids.push(id_from_element(child)),
-            "requestdate" => prospect.request_date = Some(text_from_element(child)),
+            "requestdate" => set_singleton(
+                &mut prospect.request_date,
+                &mut prospect.extensions,
+                child,
+                text_from_element,
+            ),
             "vehicle" => prospect.vehicles.push(vehicle_from_element(child)),
-            "customer" => prospect.customer = Some(customer_from_element(child)),
-            "vendor" => prospect.vendor = Some(vendor_from_element(child)),
-            "provider" => prospect.provider = Some(provider_from_element(child)),
+            "customer" => set_singleton(
+                &mut prospect.customer,
+                &mut prospect.extensions,
+                child,
+                customer_from_element,
+            ),
+            "vendor" => set_singleton(
+                &mut prospect.vendor,
+                &mut prospect.extensions,
+                child,
+                vendor_from_element,
+            ),
+            "provider" => set_singleton(
+                &mut prospect.provider,
+                &mut prospect.extensions,
+                child,
+                provider_from_element,
+            ),
             _ => prospect.extensions.push(XmlNode::Element(child)),
         }
     }
@@ -637,26 +711,96 @@ fn vehicle_from_element<'a>(element: XmlElement<'a>) -> Vehicle<'a> {
         };
         match child.name.as_ref() {
             "id" => vehicle.ids.push(id_from_element(child)),
-            "year" => vehicle.year = Some(text_from_element(child)),
-            "make" => vehicle.make = Some(text_from_element(child)),
-            "model" => vehicle.model = Some(text_from_element(child)),
-            "vin" => vehicle.vin = Some(text_from_element(child)),
-            "stock" => vehicle.stock = Some(text_from_element(child)),
-            "trim" => vehicle.trim = Some(text_from_element(child)),
-            "doors" => vehicle.doors = Some(text_from_element(child)),
-            "bodystyle" => vehicle.body_style = Some(text_from_element(child)),
-            "transmission" => vehicle.transmission = Some(text_from_element(child)),
-            "odometer" => vehicle.odometer = Some(text_from_element(child)),
-            "condition" => vehicle.condition = Some(text_from_element(child)),
+            "year" => set_singleton(
+                &mut vehicle.year,
+                &mut vehicle.extensions,
+                child,
+                text_from_element,
+            ),
+            "make" => set_singleton(
+                &mut vehicle.make,
+                &mut vehicle.extensions,
+                child,
+                text_from_element,
+            ),
+            "model" => set_singleton(
+                &mut vehicle.model,
+                &mut vehicle.extensions,
+                child,
+                text_from_element,
+            ),
+            "vin" => set_singleton(
+                &mut vehicle.vin,
+                &mut vehicle.extensions,
+                child,
+                text_from_element,
+            ),
+            "stock" => set_singleton(
+                &mut vehicle.stock,
+                &mut vehicle.extensions,
+                child,
+                text_from_element,
+            ),
+            "trim" => set_singleton(
+                &mut vehicle.trim,
+                &mut vehicle.extensions,
+                child,
+                text_from_element,
+            ),
+            "doors" => set_singleton(
+                &mut vehicle.doors,
+                &mut vehicle.extensions,
+                child,
+                text_from_element,
+            ),
+            "bodystyle" => set_singleton(
+                &mut vehicle.body_style,
+                &mut vehicle.extensions,
+                child,
+                text_from_element,
+            ),
+            "transmission" => set_singleton(
+                &mut vehicle.transmission,
+                &mut vehicle.extensions,
+                child,
+                text_from_element,
+            ),
+            "odometer" => set_singleton(
+                &mut vehicle.odometer,
+                &mut vehicle.extensions,
+                child,
+                text_from_element,
+            ),
+            "condition" => set_singleton(
+                &mut vehicle.condition,
+                &mut vehicle.extensions,
+                child,
+                text_from_element,
+            ),
             "colorcombination" => vehicle
                 .color_combinations
                 .push(color_combination_from_element(child)),
             "imagetag" => vehicle.image_tags.push(text_from_element(child)),
             "price" => vehicle.prices.push(price_from_element(child)),
-            "pricecomments" => vehicle.price_comments = Some(text_from_element(child)),
+            "pricecomments" => set_singleton(
+                &mut vehicle.price_comments,
+                &mut vehicle.extensions,
+                child,
+                text_from_element,
+            ),
             "option" => vehicle.options.push(option_from_element(child)),
-            "finance" => vehicle.finance = Some(finance_from_element(child)),
-            "comments" => vehicle.comments = Some(text_from_element(child)),
+            "finance" => set_singleton(
+                &mut vehicle.finance,
+                &mut vehicle.extensions,
+                child,
+                finance_from_element,
+            ),
+            "comments" => set_singleton(
+                &mut vehicle.comments,
+                &mut vehicle.extensions,
+                child,
+                text_from_element,
+            ),
             _ => vehicle.extensions.push(XmlNode::Element(child)),
         }
     }
@@ -681,9 +825,24 @@ fn color_combination_from_element<'a>(element: XmlElement<'a>) -> ColorCombinati
             continue;
         };
         match child.name.as_ref() {
-            "interiorcolor" => colors.interior_color = Some(text_from_element(child)),
-            "exteriorcolor" => colors.exterior_color = Some(text_from_element(child)),
-            "preference" => colors.preference = Some(text_from_element(child)),
+            "interiorcolor" => set_singleton(
+                &mut colors.interior_color,
+                &mut colors.extensions,
+                child,
+                text_from_element,
+            ),
+            "exteriorcolor" => set_singleton(
+                &mut colors.exterior_color,
+                &mut colors.extensions,
+                child,
+                text_from_element,
+            ),
+            "preference" => set_singleton(
+                &mut colors.preference,
+                &mut colors.extensions,
+                child,
+                text_from_element,
+            ),
             _ => colors.extensions.push(XmlNode::Element(child)),
         }
     }
@@ -707,10 +866,30 @@ fn option_from_element<'a>(element: XmlElement<'a>) -> VehicleOption<'a> {
             continue;
         };
         match child.name.as_ref() {
-            "optionname" => option.option_name = Some(text_from_element(child)),
-            "manufacturercode" => option.manufacturer_code = Some(text_from_element(child)),
-            "stock" => option.stock = Some(text_from_element(child)),
-            "weighting" => option.weighting = Some(text_from_element(child)),
+            "optionname" => set_singleton(
+                &mut option.option_name,
+                &mut option.extensions,
+                child,
+                text_from_element,
+            ),
+            "manufacturercode" => set_singleton(
+                &mut option.manufacturer_code,
+                &mut option.extensions,
+                child,
+                text_from_element,
+            ),
+            "stock" => set_singleton(
+                &mut option.stock,
+                &mut option.extensions,
+                child,
+                text_from_element,
+            ),
+            "weighting" => set_singleton(
+                &mut option.weighting,
+                &mut option.extensions,
+                child,
+                text_from_element,
+            ),
             "price" => option.prices.push(price_from_element(child)),
             _ => option.extensions.push(XmlNode::Element(child)),
         }
@@ -735,7 +914,12 @@ fn finance_from_element<'a>(element: XmlElement<'a>) -> Finance<'a> {
             continue;
         };
         match child.name.as_ref() {
-            "method" => finance.method = Some(text_from_element(child)),
+            "method" => set_singleton(
+                &mut finance.method,
+                &mut finance.extensions,
+                child,
+                text_from_element,
+            ),
             "amount" => finance.amounts.push(text_from_element(child)),
             "balance" => finance.balances.push(text_from_element(child)),
             _ => finance.extensions.push(XmlNode::Element(child)),
@@ -763,8 +947,18 @@ fn customer_from_element<'a>(element: XmlElement<'a>) -> Customer<'a> {
         match child.name.as_ref() {
             "id" => customer.ids.push(id_from_element(child)),
             "contact" => customer.contacts.push(contact_from_element(child)),
-            "timeframe" => customer.timeframe = Some(timeframe_from_element(child)),
-            "comments" => customer.comments = Some(text_from_element(child)),
+            "timeframe" => set_singleton(
+                &mut customer.timeframe,
+                &mut customer.extensions,
+                child,
+                timeframe_from_element,
+            ),
+            "comments" => set_singleton(
+                &mut customer.comments,
+                &mut customer.extensions,
+                child,
+                text_from_element,
+            ),
             _ => customer.extensions.push(XmlNode::Element(child)),
         }
     }
@@ -788,9 +982,24 @@ fn timeframe_from_element<'a>(element: XmlElement<'a>) -> Timeframe<'a> {
             continue;
         };
         match child.name.as_ref() {
-            "description" => timeframe.description = Some(text_from_element(child)),
-            "earliestdate" => timeframe.earliest_date = Some(text_from_element(child)),
-            "latestdate" => timeframe.latest_date = Some(text_from_element(child)),
+            "description" => set_singleton(
+                &mut timeframe.description,
+                &mut timeframe.extensions,
+                child,
+                text_from_element,
+            ),
+            "earliestdate" => set_singleton(
+                &mut timeframe.earliest_date,
+                &mut timeframe.extensions,
+                child,
+                text_from_element,
+            ),
+            "latestdate" => set_singleton(
+                &mut timeframe.latest_date,
+                &mut timeframe.extensions,
+                child,
+                text_from_element,
+            ),
             _ => timeframe.extensions.push(XmlNode::Element(child)),
         }
     }
@@ -815,8 +1024,18 @@ fn vendor_from_element<'a>(element: XmlElement<'a>) -> Vendor<'a> {
         };
         match child.name.as_ref() {
             "id" => vendor.ids.push(id_from_element(child)),
-            "vendorname" => vendor.vendor_name = Some(text_from_element(child)),
-            "url" => vendor.url = Some(text_from_element(child)),
+            "vendorname" => set_singleton(
+                &mut vendor.vendor_name,
+                &mut vendor.extensions,
+                child,
+                text_from_element,
+            ),
+            "url" => set_singleton(
+                &mut vendor.url,
+                &mut vendor.extensions,
+                child,
+                text_from_element,
+            ),
             "contact" => vendor.contacts.push(contact_from_element(child)),
             _ => vendor.extensions.push(XmlNode::Element(child)),
         }
@@ -842,11 +1061,36 @@ fn provider_from_element<'a>(element: XmlElement<'a>) -> Provider<'a> {
         };
         match child.name.as_ref() {
             "id" => provider.ids.push(id_from_element(child)),
-            "name" => provider.name = Some(name_from_element(child)),
-            "service" => provider.service = Some(text_from_element(child)),
-            "url" => provider.url = Some(text_from_element(child)),
-            "email" => provider.email = Some(text_from_element(child)),
-            "phone" => provider.phone = Some(text_from_element(child)),
+            "name" => set_singleton(
+                &mut provider.name,
+                &mut provider.extensions,
+                child,
+                name_from_element,
+            ),
+            "service" => set_singleton(
+                &mut provider.service,
+                &mut provider.extensions,
+                child,
+                text_from_element,
+            ),
+            "url" => set_singleton(
+                &mut provider.url,
+                &mut provider.extensions,
+                child,
+                text_from_element,
+            ),
+            "email" => set_singleton(
+                &mut provider.email,
+                &mut provider.extensions,
+                child,
+                text_from_element,
+            ),
+            "phone" => set_singleton(
+                &mut provider.phone,
+                &mut provider.extensions,
+                child,
+                text_from_element,
+            ),
             "contact" => provider.contacts.push(contact_from_element(child)),
             _ => provider.extensions.push(XmlNode::Element(child)),
         }
@@ -901,11 +1145,36 @@ fn address_from_element<'a>(element: XmlElement<'a>) -> Address<'a> {
         };
         match child.name.as_ref() {
             "street" => address.streets.push(text_from_element(child)),
-            "apartment" => address.apartment = Some(text_from_element(child)),
-            "city" => address.city = Some(text_from_element(child)),
-            "regioncode" => address.region_code = Some(text_from_element(child)),
-            "postalcode" => address.postal_code = Some(text_from_element(child)),
-            "country" => address.country = Some(text_from_element(child)),
+            "apartment" => set_singleton(
+                &mut address.apartment,
+                &mut address.extensions,
+                child,
+                text_from_element,
+            ),
+            "city" => set_singleton(
+                &mut address.city,
+                &mut address.extensions,
+                child,
+                text_from_element,
+            ),
+            "regioncode" => set_singleton(
+                &mut address.region_code,
+                &mut address.extensions,
+                child,
+                text_from_element,
+            ),
+            "postalcode" => set_singleton(
+                &mut address.postal_code,
+                &mut address.extensions,
+                child,
+                text_from_element,
+            ),
+            "country" => set_singleton(
+                &mut address.country,
+                &mut address.extensions,
+                child,
+                text_from_element,
+            ),
             _ => address.extensions.push(XmlNode::Element(child)),
         }
     }
@@ -988,6 +1257,19 @@ fn text_parts<'a>(children: Vec<XmlNode<'a>>) -> Vec<TextPart<'a>> {
         }
     }
     parts
+}
+
+fn set_singleton<'a, T>(
+    slot: &mut Option<T>,
+    extensions: &mut Vec<XmlNode<'a>>,
+    element: XmlElement<'a>,
+    convert: fn(XmlElement<'a>) -> T,
+) {
+    if slot.is_none() {
+        *slot = Some(convert(element));
+    } else {
+        extensions.push(XmlNode::Element(element));
+    }
 }
 
 fn attr<'a>(attributes: &[Attribute<'a>], name: &str) -> Option<Cow<'a, str>> {

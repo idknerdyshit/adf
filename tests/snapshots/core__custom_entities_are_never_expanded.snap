@@ -4,6 +4,7 @@ expression: doc.to_typed_string().unwrap()
 ---
 <?xml version="1.0"?>
 <?adf version="1.0"?>
+<!DOCTYPE adf [ <!ENTITY lol "ha"> ]>
 <adf>
 <prospect>
 <customer>

@@ -1,6 +1,7 @@
 use adf::{
-    AdfDocument, Attribute, DEFAULT_MAX_DOCTYPE_LEN, Error, ParseOptions, Severity, Span, TextPart,
-    ValidationOptions, ValidationReport, XmlElement, XmlNode, parse, parse_with,
+    AdfDocument, Attribute, DEFAULT_MAX_DOCTYPE_LEN, Error, ParseOptions, Severity, Span,
+    TextElement, TextPart, ValidationOptions, ValidationReport, XmlElement, XmlNode, parse,
+    parse_with,
 };
 use insta::assert_snapshot;
 use pretty_assertions::assert_eq;
@@ -471,6 +472,41 @@ fn original_preserving_writer_replaces_only_dirty_prospect_span() {
 }
 
 #[test]
+fn prospect_rewrite_preserves_duplicate_singleton_elements() {
+    let input = concat!(
+        "<adf><prospect>",
+        "<requestdate>first</requestdate>",
+        "<requestdate partner=\"duplicate\">second</requestdate>",
+        "</prospect></adf>"
+    );
+    let mut doc = parse(input).expect("well-formed duplicate elements should parse");
+
+    assert_eq!(
+        doc.adf().prospects[0]
+            .request_date
+            .as_ref()
+            .unwrap()
+            .value(),
+        "first"
+    );
+    assert!(matches!(
+        doc.adf().prospects[0].extensions.as_slice(),
+        [XmlNode::Element(element)] if element.name == "requestdate"
+    ));
+
+    doc.prospect_mut(0).unwrap().status = Some(Cow::Borrowed("new"));
+    let output = doc.to_original_preserving_string().unwrap();
+    let first = output.find("<requestdate>first").unwrap();
+    let second = output
+        .find("<requestdate partner=\"duplicate\">second")
+        .unwrap();
+    assert!(
+        first < second,
+        "duplicate elements should retain source order"
+    );
+}
+
+#[test]
 fn broad_adf_mutation_uses_typed_writer() {
     let mut doc = parse(FULL_LEAD).expect("valid ADF should parse");
     doc.adf_mut().prospects[0].status = Some(Cow::Borrowed("contacted"));
@@ -620,6 +656,42 @@ fn typed_writer_keeps_extensions_near_original_dtd_slot() {
         "typed_writer_keeps_extensions_near_original_dtd_slot",
         output
     );
+}
+
+#[test]
+fn typed_writer_keeps_extension_between_repeated_modeled_children() {
+    let input = concat!(
+        "<adf><prospect>",
+        "<vehicle><year>2023</year></vehicle>",
+        "<partner-score>97</partner-score>",
+        "<vehicle><year>2024</year></vehicle>",
+        "</prospect></adf>"
+    );
+    let doc = parse(input).expect("valid XML should parse");
+    let output = doc.to_typed_string().unwrap();
+
+    let first = output.find("<year>2023").unwrap();
+    let extension = output.find("<partner-score>").unwrap();
+    let second = output.find("<year>2024").unwrap();
+    assert!(first < extension && extension < second);
+}
+
+#[test]
+fn typed_writer_places_new_spanless_fields_in_their_modeled_slot() {
+    let input = concat!(
+        "<adf><prospect><vehicle>",
+        "<partner-score>97</partner-score><make>Honda</make>",
+        "</vehicle></prospect></adf>"
+    );
+    let mut doc = parse(input).expect("valid XML should parse");
+    doc.adf_mut().prospects[0].vehicles[0].year =
+        Some(TextElement::new(Cow::Borrowed("2024"), Vec::new()));
+    let output = doc.to_typed_string().unwrap();
+
+    let extension = output.find("<partner-score>").unwrap();
+    let year = output.find("<year>2024").unwrap();
+    let make = output.find("<make>Honda").unwrap();
+    assert!(year < extension && extension < make);
 }
 
 #[test]
@@ -1066,13 +1138,19 @@ fn custom_entities_are_never_expanded() {
         "<name>&lol;</name>",
         "</contact></customer></prospect></adf>"
     );
-    let doc = parse(input).expect("custom entity reference should parse without expansion");
+    let mut doc = parse(input).expect("custom entity reference should parse without expansion");
     let value = doc.adf().prospects[0].customer.as_ref().unwrap().contacts[0].names[0].value();
     assert_eq!(value.as_ref(), "&lol;");
-    assert_snapshot!(
-        "custom_entities_are_never_expanded",
-        doc.to_typed_string().unwrap()
-    );
+    let typed = doc.to_typed_string().unwrap();
+    assert!(typed.contains("<!DOCTYPE adf [ <!ENTITY lol \"ha\"> ]>"));
+    assert!(typed.find("<!DOCTYPE").unwrap() < typed.find("<adf>").unwrap());
+    parse(&typed).expect("typed XML should retain the entity declaration");
+    assert_snapshot!("custom_entities_are_never_expanded", typed);
+
+    doc.adf_mut().prospects[0].status = Some(Cow::Borrowed("new"));
+    let broad_rewrite = doc.to_original_preserving_string().unwrap();
+    assert!(broad_rewrite.contains("<!DOCTYPE adf [ <!ENTITY lol \"ha\"> ]>"));
+    assert!(broad_rewrite.contains("<name>&lol;</name>"));
 }
 
 #[test]

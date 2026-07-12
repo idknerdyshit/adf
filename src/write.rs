@@ -6,32 +6,38 @@ use crate::model::{
 use crate::{Error, Result};
 use std::io::Write;
 
-pub(crate) fn write_adf<W: Write>(mut writer: W, adf: &Adf<'_>) -> Result<()> {
+pub(crate) fn write_adf<W: Write>(
+    mut writer: W,
+    adf: &Adf<'_>,
+    prolog: &[XmlNode<'_>],
+    epilog: &[XmlNode<'_>],
+) -> Result<()> {
     writer.write_all(br#"<?xml version="1.0"?>"#)?;
     writer.write_all(b"\n<?adf version=\"1.0\"?>")?;
+    write_document_misc(&mut writer, prolog)?;
     start_with_attrs(&mut writer, "adf", &adf.attributes)?;
     if adf.extensions.is_empty() {
         for prospect in &adf.prospects {
             write_prospect(&mut writer, prospect)?;
         }
-        writer.write_all(b"\n</adf>")?;
-        return Ok(());
+    } else {
+        let mut children = Vec::new();
+        for prospect in &adf.prospects {
+            children.push(Child::Prospect {
+                value: prospect,
+                order: 0,
+            });
+        }
+        for extension in &adf.extensions {
+            children.push(Child::Extension {
+                value: extension,
+                order: 1,
+            });
+        }
+        write_children(&mut writer, &mut children)?;
     }
-    let mut children = Vec::new();
-    for prospect in &adf.prospects {
-        children.push(Child::Prospect {
-            value: prospect,
-            order: 0,
-        });
-    }
-    for extension in &adf.extensions {
-        children.push(Child::Extension {
-            value: extension,
-            order: 1,
-        });
-    }
-    write_children(&mut writer, &mut children)?;
     writer.write_all(b"\n</adf>")?;
+    write_document_misc(&mut writer, epilog)?;
     Ok(())
 }
 
@@ -44,7 +50,7 @@ pub(crate) fn write_original_preserving<W: Write>(
             reason = "dirty_all",
             "original-preserving write using typed writer"
         );
-        return write_adf(writer, &document.adf);
+        return write_adf(writer, &document.adf, &document.prolog, &document.epilog);
     }
 
     let mut cursor = 0;
@@ -58,7 +64,7 @@ pub(crate) fn write_original_preserving<W: Write>(
                 prospect_index = index,
                 "original-preserving write using typed writer"
             );
-            return write_adf(writer, &document.adf);
+            return write_adf(writer, &document.adf, &document.prolog, &document.epilog);
         };
         let Some(prospect) = document.adf.prospects.get(index) else {
             tracing::debug!(
@@ -66,7 +72,7 @@ pub(crate) fn write_original_preserving<W: Write>(
                 prospect_index = index,
                 "original-preserving write using typed writer"
             );
-            return write_adf(writer, &document.adf);
+            return write_adf(writer, &document.adf, &document.prolog, &document.epilog);
         };
 
         writer.write_all(&document.original.as_bytes()[cursor..span.start])?;
@@ -757,32 +763,28 @@ fn write_children<W: Write>(writer: &mut W, children: &mut [Child<'_, '_>]) -> R
         })
         .collect();
     known_spans.sort_by_key(|(start, _)| *start);
-    let mut max_order = 0;
-    for (_, order) in &mut known_spans {
-        max_order = max_order.max(*order);
-        *order = max_order;
-    }
 
     children.sort_by_cached_key(|child| {
         let span = child.span();
         if span.start == 0 && span.end == 0 {
-            return (1, child.order(), usize::MAX);
+            return (child.order(), 1, usize::MAX);
         }
 
         if child.is_extension() {
             let index = known_spans.partition_point(|(known_start, _)| *known_start < span.start);
-            let order = if index == 0 {
-                1
+            let order = if let Some((_, previous_order)) = index
+                .checked_sub(1)
+                .and_then(|previous| known_spans.get(previous))
+            {
+                *previous_order
+            } else if let Some((_, next_order)) = known_spans.get(index) {
+                *next_order
             } else {
-                known_spans[index - 1].1.saturating_mul(2).saturating_add(3)
+                child.order()
             };
-            (0, order, span.start)
+            (order, 0, span.start)
         } else {
-            (
-                0,
-                child.order().saturating_mul(2).saturating_add(2),
-                span.start,
-            )
+            (child.order(), 0, span.start)
         }
     });
 
@@ -884,6 +886,27 @@ fn write_cdata<W: Write>(writer: &mut W, text: &str) -> Result<()> {
             return Ok(());
         }
     }
+}
+
+fn write_document_misc<W: Write>(writer: &mut W, nodes: &[XmlNode<'_>]) -> Result<()> {
+    for node in nodes {
+        match node {
+            XmlNode::Declaration(_) => {}
+            XmlNode::Text(text) if text.bytes().all(|byte| byte.is_ascii_whitespace()) => {}
+            XmlNode::ProcessingInstruction(pi) if pi.split_whitespace().next() == Some("adf") => {}
+            XmlNode::DocType(doc_type) => {
+                validate_xml_chars(doc_type)?;
+                writer.write_all(b"\n<!DOCTYPE ")?;
+                writer.write_all(doc_type.as_bytes())?;
+                writer.write_all(b">")?;
+            }
+            node => {
+                writer.write_all(b"\n")?;
+                write_xml_node(writer, node)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn write_xml_node<W: Write>(writer: &mut W, node: &XmlNode<'_>) -> Result<()> {
