@@ -329,6 +329,18 @@ fn rejects_non_adf_root() {
         parse("<not-adf />"),
         Err(Error::UnexpectedRoot { found, .. }) if found == "not-adf"
     ));
+    assert!(matches!(
+        parse("<not-adf><child>"),
+        Err(Error::UnexpectedEnd { name, .. }) if name == "child"
+    ));
+    assert!(matches!(
+        parse("<not-adf/><adf/>"),
+        Err(Error::MultipleRoots)
+    ));
+    assert!(matches!(
+        parse("<not-adf/>junk"),
+        Err(Error::ContentOutsideRoot { .. })
+    ));
 }
 
 #[test]
@@ -1432,6 +1444,71 @@ fn duplicate_singular_elements_survive_dirty_rewrites() {
     document.prospect_mut(0).unwrap().status = Some(Cow::Borrowed("new"));
     let rewritten = document.to_original_preserving_string().unwrap();
     assert_eq!(rewritten.matches("<requestdate>").count(), 2);
+}
+
+#[test]
+fn streaming_parse_preserves_deep_duplicates_mixed_content_and_document_misc() {
+    let input = concat!(
+        "<?xml version=\"1.0\"?><!--before-->",
+        "<!DOCTYPE adf [<!ENTITY partner \"retained\">]>",
+        "<adf xmlns:p=\"urn:partner\"><prospect status=\"new\">",
+        "<vehicle><year>2026</year><year p:duplicate=\"1\">2027</year>",
+        "<make>Example</make><model>Streaming</model>",
+        "<comments>before<![CDATA[<offer>]]>&partner;<p:token code=\"x\">VIP</p:token>after</comments>",
+        "</vehicle><customer><contact><address>",
+        "<street>1 Main</street><city>First</city><city>Second</city><country>US</country>",
+        "</address></contact></customer><vendor/></prospect></adf>",
+        "<?after root?>"
+    );
+
+    let mut document = parse(input).expect("streaming fixture should parse");
+    assert_eq!(document.to_original_preserving_string().unwrap(), input);
+
+    let prospect = &document.adf().prospects[0];
+    assert_eq!(
+        &input[prospect.span.start..prospect.span.end],
+        &input[input.find("<prospect").unwrap()..input.find("</prospect>").unwrap() + 11]
+    );
+    let vehicle = &prospect.vehicles[0];
+    assert_eq!(vehicle.year.as_ref().unwrap().value(), "2026");
+    assert!(vehicle.extensions.iter().any(|node| {
+        matches!(node, XmlNode::Element(element) if element.name == "year" && element.attributes.iter().any(|attribute| attribute.name == "p:duplicate"))
+    }));
+
+    let comments = vehicle.comments.as_ref().unwrap();
+    assert!(matches!(&comments.parts[0], TextPart::Text(value) if value == "before"));
+    assert!(matches!(&comments.parts[1], TextPart::CData(value) if value == "<offer>"));
+    assert!(matches!(&comments.parts[2], TextPart::EntityRef(value) if value == "partner"));
+    assert!(
+        matches!(&comments.parts[3], TextPart::Node(XmlNode::Element(element)) if element.name == "p:token")
+    );
+    assert!(matches!(&comments.parts[4], TextPart::Text(value) if value == "after"));
+
+    let address = &prospect.customer.as_ref().unwrap().contacts[0].addresses[0];
+    assert_eq!(address.city.as_ref().unwrap().value(), "First");
+    assert!(
+        address
+            .extensions
+            .iter()
+            .any(|node| matches!(node, XmlNode::Element(element) if element.name == "city"))
+    );
+
+    assert_eq!(document.root().name, "adf");
+    let typed = document.to_typed_string().unwrap();
+    for expected in [
+        "<!--before-->",
+        "<!DOCTYPE adf",
+        "<year p:duplicate=\"1\">2027</year>",
+        "<city>Second</city>",
+        "<?after root?>",
+    ] {
+        assert!(typed.contains(expected), "missing {expected}: {typed}");
+    }
+
+    document.prospect_mut(0).unwrap().status = Some(Cow::Borrowed("resend"));
+    let rewritten = document.to_original_preserving_string().unwrap();
+    assert_eq!(rewritten.matches("<year").count(), 2);
+    assert_eq!(rewritten.matches("<city>").count(), 2);
 }
 
 #[test]

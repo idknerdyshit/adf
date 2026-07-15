@@ -1,18 +1,15 @@
 use crate::document::{AdfDocument, Attribute, Span, XmlElement, XmlNode};
 use crate::error::{Error, Result};
-use crate::model::{
-    Address, Adf, ColorCombination, Contact, Customer, Finance, Id, Name, Price, Prospect,
-    Provider, TextElement, TextPart, Timeframe, Vehicle, VehicleOption, Vendor,
-    resolve_standard_entity,
-};
+use crate::model::resolve_standard_entity;
 use quick_xml::Reader;
 use quick_xml::encoding::Decoder;
 use quick_xml::events::{BytesStart, Event};
 use std::borrow::Cow;
 use std::cell::OnceCell;
 use std::io::Read;
-use std::ops::Range;
 use std::str;
+
+mod stream;
 
 /// Default ceiling, in bytes, on the length of a `<!DOCTYPE …>` declaration's
 /// payload. Legitimate ADF documents rarely carry a DTD at all; the cap keeps
@@ -228,14 +225,19 @@ pub(crate) fn parse_with<'a>(input: &'a str, options: &ParseOptions) -> Result<A
     );
     let _span_guard = span.enter();
 
-    let parsed = match parse_document_tree(input, options) {
+    let parsed = match drive_events(input, options, stream::TypedAdfBuilder::default()) {
         Ok(parsed) => parsed,
         Err(error) => {
             crate::trace::record_error("parse", &error);
             return Err(error);
         }
     };
-    let (adf, prospect_spans) = adf_from_root(parsed.root)?;
+    let stream::ParsedTypedDocument {
+        adf,
+        prospect_spans,
+        prolog,
+        epilog,
+    } = parsed;
     if tracing::enabled!(tracing::Level::DEBUG) {
         let stats = crate::trace::DocumentStats::from_adf(&adf);
         tracing::debug!(
@@ -252,8 +254,8 @@ pub(crate) fn parse_with<'a>(input: &'a str, options: &ParseOptions) -> Result<A
         *options,
         adf,
         prospect_spans,
-        parsed.prolog,
-        parsed.epilog,
+        prolog,
+        epilog,
     ))
 }
 
@@ -264,13 +266,34 @@ pub(crate) fn parse_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<X
 pub(crate) struct ParsedDocumentTree<'a> {
     pub root: XmlElement<'a>,
     pub prolog: Vec<XmlNode<'a>>,
-    pub epilog: Vec<XmlNode<'a>>,
+    _epilog: Vec<XmlNode<'a>>,
 }
 
 pub(crate) fn parse_document_tree<'a>(
     input: &'a str,
     options: &ParseOptions,
 ) -> Result<ParsedDocumentTree<'a>> {
+    drive_events(input, options, RawTreeBuilder::default())
+}
+
+pub(super) trait EventConsumer<'a> {
+    type Output;
+
+    fn start(&mut self, element: XmlElement<'a>, position: u64) -> Result<()>;
+    fn empty(&mut self, element: XmlElement<'a>, position: u64) -> Result<()>;
+    fn end(&mut self, name: Cow<'a, str>, span_end: usize, position: u64) -> Result<()>;
+    fn node(&mut self, node: XmlNode<'a>, position: u64) -> Result<()>;
+    fn finish(self, position: u64) -> Result<Self::Output>;
+}
+
+pub(super) fn drive_events<'a, C>(
+    input: &'a str,
+    options: &ParseOptions,
+    mut consumer: C,
+) -> Result<C::Output>
+where
+    C: EventConsumer<'a>,
+{
     check_limit(
         options.max_input_len,
         input.len(),
@@ -283,11 +306,8 @@ pub(crate) fn parse_document_tree<'a>(
         config.trim_text(false);
         config.check_comments = true;
     }
-    let mut stack: Vec<XmlElement<'_>> = Vec::new();
-    let mut root: Option<XmlElement<'_>> = None;
-    let mut prolog = Vec::new();
-    let mut epilog = Vec::new();
     let mut node_count = 0_usize;
+    let mut depth = 0_usize;
 
     loop {
         let event_start = reader.buffer_position() as usize;
@@ -297,34 +317,9 @@ pub(crate) fn parse_document_tree<'a>(
             .map_err(|source| Error::xml(position, source))?
         {
             Event::Start(start) => {
-                check_limit(
-                    options.max_depth,
-                    stack.len() + 1,
-                    ParseLimit::Depth,
-                    position,
-                )?;
+                check_limit(options.max_depth, depth + 1, ParseLimit::Depth, position)?;
                 record_node(&mut node_count, options, position)?;
-                stack.push(element_from_start(
-                    input,
-                    &reader,
-                    start,
-                    options,
-                    position,
-                    event_start,
-                    reader.buffer_position() as usize,
-                )?);
-            }
-            Event::Empty(start) => {
-                check_limit(
-                    options.max_depth,
-                    stack.len() + 1,
-                    ParseLimit::Depth,
-                    position,
-                )?;
-                record_node(&mut node_count, options, position)?;
-                append_element(
-                    &mut stack,
-                    &mut root,
+                consumer.start(
                     element_from_start(
                         input,
                         &reader,
@@ -334,23 +329,30 @@ pub(crate) fn parse_document_tree<'a>(
                         event_start,
                         reader.buffer_position() as usize,
                     )?,
+                    position,
+                )?;
+                depth += 1;
+            }
+            Event::Empty(start) => {
+                check_limit(options.max_depth, depth + 1, ParseLimit::Depth, position)?;
+                record_node(&mut node_count, options, position)?;
+                consumer.empty(
+                    element_from_start(
+                        input,
+                        &reader,
+                        start,
+                        options,
+                        position,
+                        event_start,
+                        reader.buffer_position() as usize,
+                    )?,
+                    position,
                 )?;
             }
             Event::End(end) => {
-                let found = name_from_bytes(end.name().as_ref(), position)?.to_owned();
-                let mut element = stack.pop().ok_or_else(|| Error::UnexpectedEnd {
-                    name: found.clone(),
-                    position,
-                })?;
-                if element.name.as_ref() != found {
-                    return Err(Error::MismatchedEnd {
-                        expected: element.name.into_owned(),
-                        found,
-                        position,
-                    });
-                }
-                element.span.end = reader.buffer_position() as usize;
-                append_element(&mut stack, &mut root, element)?;
+                let name = borrowed_name(input, end.name().as_ref(), position)?;
+                consumer.end(name, reader.buffer_position() as usize, position)?;
+                depth = depth.saturating_sub(1);
             }
             Event::Text(text) => {
                 record_node(&mut node_count, options, position)?;
@@ -358,14 +360,7 @@ pub(crate) fn parse_document_tree<'a>(
                     .xml_content()
                     .map_err(|source| Error::encoding(position, source))?;
                 ensure_xml_chars(&text, position)?;
-                append_node(
-                    &mut stack,
-                    root.is_some(),
-                    &mut prolog,
-                    &mut epilog,
-                    XmlNode::Text(text),
-                    position,
-                )?;
+                consumer.node(XmlNode::Text(text), position)?;
             }
             Event::CData(cdata) => {
                 record_node(&mut node_count, options, position)?;
@@ -373,14 +368,7 @@ pub(crate) fn parse_document_tree<'a>(
                     .decode()
                     .map_err(|source| Error::encoding(position, source))?;
                 ensure_xml_chars(&cdata, position)?;
-                append_node(
-                    &mut stack,
-                    root.is_some(),
-                    &mut prolog,
-                    &mut epilog,
-                    XmlNode::CData(cdata),
-                    position,
-                )?;
+                consumer.node(XmlNode::CData(cdata), position)?;
             }
             Event::Comment(comment) => {
                 record_node(&mut node_count, options, position)?;
@@ -388,22 +376,11 @@ pub(crate) fn parse_document_tree<'a>(
                     .decode()
                     .map_err(|source| Error::encoding(position, source))?;
                 ensure_xml_chars(&comment, position)?;
-                append_node(
-                    &mut stack,
-                    root.is_some(),
-                    &mut prolog,
-                    &mut epilog,
-                    XmlNode::Comment(comment),
-                    position,
-                )?;
+                consumer.node(XmlNode::Comment(comment), position)?;
             }
             Event::PI(pi) => {
                 record_node(&mut node_count, options, position)?;
-                append_node(
-                    &mut stack,
-                    root.is_some(),
-                    &mut prolog,
-                    &mut epilog,
+                consumer.node(
                     XmlNode::ProcessingInstruction(Cow::Owned(validated_name_payload(
                         pi.as_ref(),
                         position,
@@ -415,23 +392,13 @@ pub(crate) fn parse_document_tree<'a>(
                 record_node(&mut node_count, options, position)?;
                 let declaration = validated_name_payload(decl.as_ref(), position)?;
                 ensure_utf8_declaration(&declaration, position)?;
-                append_node(
-                    &mut stack,
-                    root.is_some(),
-                    &mut prolog,
-                    &mut epilog,
-                    XmlNode::Declaration(Cow::Owned(declaration)),
-                    position,
-                )?;
+                consumer.node(XmlNode::Declaration(Cow::Owned(declaration)), position)?;
             }
             Event::DocType(doc_type) => {
                 record_node(&mut node_count, options, position)?;
                 if options.reject_doctype {
                     return Err(Error::DocTypeForbidden { position });
                 }
-                // Bound the raw byte length before decoding so an oversized
-                // declaration is rejected without paying for a full UTF-8 scan
-                // (or transcode) of the payload.
                 if let Some(limit) = options.max_doctype_len {
                     let length = doc_type.len();
                     if length > limit {
@@ -446,48 +413,83 @@ pub(crate) fn parse_document_tree<'a>(
                     .decode()
                     .map_err(|source| Error::encoding(position, source))?;
                 ensure_xml_chars(&decoded, position)?;
-                append_node(
-                    &mut stack,
-                    root.is_some(),
-                    &mut prolog,
-                    &mut epilog,
-                    XmlNode::DocType(decoded),
-                    position,
-                )?;
+                consumer.node(XmlNode::DocType(decoded), position)?;
             }
             Event::GeneralRef(general_ref) => {
                 record_node(&mut node_count, options, position)?;
-                if stack.is_empty() {
+                if depth == 0 {
                     return Err(Error::ContentOutsideRoot { position });
                 }
                 let entity = general_ref
                     .decode()
                     .map_err(|source| Error::encoding(position, source))?;
-                append_node(
-                    &mut stack,
-                    root.is_some(),
-                    &mut prolog,
-                    &mut epilog,
-                    general_ref_node(entity, position)?,
-                    position,
-                )?;
+                consumer.node(general_ref_node(entity, position)?, position)?;
             }
-            Event::Eof => break,
+            Event::Eof => return consumer.finish(reader.error_position()),
         }
     }
+}
 
-    if let Some(unclosed) = stack.pop() {
-        return Err(Error::UnexpectedEnd {
-            name: unclosed.name.into_owned(),
-            position: reader.error_position(),
-        });
+#[derive(Default)]
+struct RawTreeBuilder<'a> {
+    stack: Vec<XmlElement<'a>>,
+    root: Option<XmlElement<'a>>,
+    prolog: Vec<XmlNode<'a>>,
+    epilog: Vec<XmlNode<'a>>,
+}
+
+impl<'a> EventConsumer<'a> for RawTreeBuilder<'a> {
+    type Output = ParsedDocumentTree<'a>;
+
+    fn start(&mut self, element: XmlElement<'a>, _position: u64) -> Result<()> {
+        self.stack.push(element);
+        Ok(())
     }
 
-    Ok(ParsedDocumentTree {
-        root: root.ok_or(Error::MissingRoot)?,
-        prolog,
-        epilog,
-    })
+    fn empty(&mut self, element: XmlElement<'a>, _position: u64) -> Result<()> {
+        append_element(&mut self.stack, &mut self.root, element)
+    }
+
+    fn end(&mut self, name: Cow<'a, str>, span_end: usize, position: u64) -> Result<()> {
+        let mut element = self.stack.pop().ok_or_else(|| Error::UnexpectedEnd {
+            name: name.to_string(),
+            position,
+        })?;
+        if element.name != name {
+            return Err(Error::MismatchedEnd {
+                expected: element.name.into_owned(),
+                found: name.into_owned(),
+                position,
+            });
+        }
+        element.span.end = span_end;
+        append_element(&mut self.stack, &mut self.root, element)
+    }
+
+    fn node(&mut self, node: XmlNode<'a>, position: u64) -> Result<()> {
+        append_node(
+            &mut self.stack,
+            self.root.is_some(),
+            &mut self.prolog,
+            &mut self.epilog,
+            node,
+            position,
+        )
+    }
+
+    fn finish(mut self, position: u64) -> Result<Self::Output> {
+        if let Some(unclosed) = self.stack.pop() {
+            return Err(Error::UnexpectedEnd {
+                name: unclosed.name.into_owned(),
+                position,
+            });
+        }
+        Ok(ParsedDocumentTree {
+            root: self.root.ok_or(Error::MissingRoot)?,
+            prolog: self.prolog,
+            _epilog: self.epilog,
+        })
+    }
 }
 
 fn ensure_utf8_declaration(declaration: &str, position: u64) -> Result<()> {
@@ -846,693 +848,9 @@ fn is_xml_name_char(ch: char) -> bool {
         )
 }
 
-fn adf_from_root<'a>(root: XmlElement<'a>) -> Result<(Adf<'a>, Vec<Range<usize>>)> {
-    let mut prospect_spans = Vec::new();
-    if root.name.as_ref() != "adf" {
-        return Err(Error::UnexpectedRoot {
-            found: root.name.into_owned(),
-            position: root.span.start as u64,
-        });
-    }
-
-    let XmlElement {
-        attributes,
-        children,
-        span,
-        ..
-    } = root;
-    let mut adf = Adf {
-        attributes,
-        span,
-        ..Default::default()
-    };
-
-    for node in children {
-        let Some(child) = element_child_or_extension(node, &mut adf.extensions) else {
-            continue;
-        };
-        match child.name.as_ref() {
-            "prospect" => {
-                prospect_spans.push(child.span.start..child.span.end);
-                adf.prospects.push(prospect_from_element(child));
-            }
-            _ => adf.extensions.push(XmlNode::Element(child)),
-        }
-    }
-    Ok((adf, prospect_spans))
-}
-
-fn prospect_from_element<'a>(element: XmlElement<'a>) -> Prospect<'a> {
-    let XmlElement {
-        attributes,
-        children,
-        span,
-        ..
-    } = element;
-    let mut prospect = Prospect {
-        status: attr(&attributes, "status"),
-        attributes,
-        span,
-        ..Default::default()
-    };
-
-    for node in children {
-        let Some(child) = element_child_or_extension(node, &mut prospect.extensions) else {
-            continue;
-        };
-        match child.name.as_ref() {
-            "id" => prospect.ids.push(id_from_element(child)),
-            "requestdate" => set_singular(
-                &mut prospect.request_date,
-                &mut prospect.extensions,
-                child,
-                text_from_element,
-            ),
-            "vehicle" => prospect.vehicles.push(vehicle_from_element(child)),
-            "customer" => set_singular(
-                &mut prospect.customer,
-                &mut prospect.extensions,
-                child,
-                customer_from_element,
-            ),
-            "vendor" => set_singular(
-                &mut prospect.vendor,
-                &mut prospect.extensions,
-                child,
-                vendor_from_element,
-            ),
-            "provider" => set_singular(
-                &mut prospect.provider,
-                &mut prospect.extensions,
-                child,
-                provider_from_element,
-            ),
-            _ => prospect.extensions.push(XmlNode::Element(child)),
-        }
-    }
-
-    prospect
-}
-
-fn vehicle_from_element<'a>(element: XmlElement<'a>) -> Vehicle<'a> {
-    let XmlElement {
-        attributes,
-        children,
-        span,
-        ..
-    } = element;
-    let mut vehicle = Vehicle {
-        interest: attr(&attributes, "interest"),
-        status: attr(&attributes, "status"),
-        attributes,
-        span,
-        ..Default::default()
-    };
-
-    for node in children {
-        let Some(child) = element_child_or_extension(node, &mut vehicle.extensions) else {
-            continue;
-        };
-        match child.name.as_ref() {
-            "id" => vehicle.ids.push(id_from_element(child)),
-            "year" => set_singular(
-                &mut vehicle.year,
-                &mut vehicle.extensions,
-                child,
-                text_from_element,
-            ),
-            "make" => set_singular(
-                &mut vehicle.make,
-                &mut vehicle.extensions,
-                child,
-                text_from_element,
-            ),
-            "model" => set_singular(
-                &mut vehicle.model,
-                &mut vehicle.extensions,
-                child,
-                text_from_element,
-            ),
-            "vin" => set_singular(
-                &mut vehicle.vin,
-                &mut vehicle.extensions,
-                child,
-                text_from_element,
-            ),
-            "stock" => set_singular(
-                &mut vehicle.stock,
-                &mut vehicle.extensions,
-                child,
-                text_from_element,
-            ),
-            "trim" => set_singular(
-                &mut vehicle.trim,
-                &mut vehicle.extensions,
-                child,
-                text_from_element,
-            ),
-            "doors" => set_singular(
-                &mut vehicle.doors,
-                &mut vehicle.extensions,
-                child,
-                text_from_element,
-            ),
-            "bodystyle" => set_singular(
-                &mut vehicle.body_style,
-                &mut vehicle.extensions,
-                child,
-                text_from_element,
-            ),
-            "transmission" => set_singular(
-                &mut vehicle.transmission,
-                &mut vehicle.extensions,
-                child,
-                text_from_element,
-            ),
-            "odometer" => set_singular(
-                &mut vehicle.odometer,
-                &mut vehicle.extensions,
-                child,
-                text_from_element,
-            ),
-            "condition" => set_singular(
-                &mut vehicle.condition,
-                &mut vehicle.extensions,
-                child,
-                text_from_element,
-            ),
-            "colorcombination" => vehicle
-                .color_combinations
-                .push(color_combination_from_element(child)),
-            "imagetag" => vehicle.image_tags.push(text_from_element(child)),
-            "price" => vehicle.prices.push(price_from_element(child)),
-            "pricecomments" => set_singular(
-                &mut vehicle.price_comments,
-                &mut vehicle.extensions,
-                child,
-                text_from_element,
-            ),
-            "option" => vehicle.options.push(option_from_element(child)),
-            "finance" => set_singular(
-                &mut vehicle.finance,
-                &mut vehicle.extensions,
-                child,
-                finance_from_element,
-            ),
-            "comments" => set_singular(
-                &mut vehicle.comments,
-                &mut vehicle.extensions,
-                child,
-                text_from_element,
-            ),
-            _ => vehicle.extensions.push(XmlNode::Element(child)),
-        }
-    }
-
-    vehicle
-}
-
-fn color_combination_from_element<'a>(element: XmlElement<'a>) -> ColorCombination<'a> {
-    let XmlElement {
-        attributes,
-        children,
-        span,
-        ..
-    } = element;
-    let mut colors = ColorCombination {
-        attributes,
-        span,
-        ..Default::default()
-    };
-    for node in children {
-        let Some(child) = element_child_or_extension(node, &mut colors.extensions) else {
-            continue;
-        };
-        match child.name.as_ref() {
-            "interiorcolor" => set_singular(
-                &mut colors.interior_color,
-                &mut colors.extensions,
-                child,
-                text_from_element,
-            ),
-            "exteriorcolor" => set_singular(
-                &mut colors.exterior_color,
-                &mut colors.extensions,
-                child,
-                text_from_element,
-            ),
-            "preference" => set_singular(
-                &mut colors.preference,
-                &mut colors.extensions,
-                child,
-                text_from_element,
-            ),
-            _ => colors.extensions.push(XmlNode::Element(child)),
-        }
-    }
-    colors
-}
-
-fn option_from_element<'a>(element: XmlElement<'a>) -> VehicleOption<'a> {
-    let XmlElement {
-        attributes,
-        children,
-        span,
-        ..
-    } = element;
-    let mut option = VehicleOption {
-        attributes,
-        span,
-        ..Default::default()
-    };
-    for node in children {
-        let Some(child) = element_child_or_extension(node, &mut option.extensions) else {
-            continue;
-        };
-        match child.name.as_ref() {
-            "optionname" => set_singular(
-                &mut option.option_name,
-                &mut option.extensions,
-                child,
-                text_from_element,
-            ),
-            "manufacturercode" => set_singular(
-                &mut option.manufacturer_code,
-                &mut option.extensions,
-                child,
-                text_from_element,
-            ),
-            "stock" => set_singular(
-                &mut option.stock,
-                &mut option.extensions,
-                child,
-                text_from_element,
-            ),
-            "weighting" => set_singular(
-                &mut option.weighting,
-                &mut option.extensions,
-                child,
-                text_from_element,
-            ),
-            "price" => option.prices.push(price_from_element(child)),
-            _ => option.extensions.push(XmlNode::Element(child)),
-        }
-    }
-    option
-}
-
-fn finance_from_element<'a>(element: XmlElement<'a>) -> Finance<'a> {
-    let XmlElement {
-        attributes,
-        children,
-        span,
-        ..
-    } = element;
-    let mut finance = Finance {
-        attributes,
-        span,
-        ..Default::default()
-    };
-    for node in children {
-        let Some(child) = element_child_or_extension(node, &mut finance.extensions) else {
-            continue;
-        };
-        match child.name.as_ref() {
-            "method" => set_singular(
-                &mut finance.method,
-                &mut finance.extensions,
-                child,
-                text_from_element,
-            ),
-            "amount" => finance.amounts.push(text_from_element(child)),
-            "balance" => finance.balances.push(text_from_element(child)),
-            _ => finance.extensions.push(XmlNode::Element(child)),
-        }
-    }
-    finance
-}
-
-fn customer_from_element<'a>(element: XmlElement<'a>) -> Customer<'a> {
-    let XmlElement {
-        attributes,
-        children,
-        span,
-        ..
-    } = element;
-    let mut customer = Customer {
-        attributes,
-        span,
-        ..Default::default()
-    };
-    for node in children {
-        let Some(child) = element_child_or_extension(node, &mut customer.extensions) else {
-            continue;
-        };
-        match child.name.as_ref() {
-            "id" => customer.ids.push(id_from_element(child)),
-            "contact" => customer.contacts.push(contact_from_element(child)),
-            "timeframe" => set_singular(
-                &mut customer.timeframe,
-                &mut customer.extensions,
-                child,
-                timeframe_from_element,
-            ),
-            "comments" => set_singular(
-                &mut customer.comments,
-                &mut customer.extensions,
-                child,
-                text_from_element,
-            ),
-            _ => customer.extensions.push(XmlNode::Element(child)),
-        }
-    }
-    customer
-}
-
-fn timeframe_from_element<'a>(element: XmlElement<'a>) -> Timeframe<'a> {
-    let XmlElement {
-        attributes,
-        children,
-        span,
-        ..
-    } = element;
-    let mut timeframe = Timeframe {
-        attributes,
-        span,
-        ..Default::default()
-    };
-    for node in children {
-        let Some(child) = element_child_or_extension(node, &mut timeframe.extensions) else {
-            continue;
-        };
-        match child.name.as_ref() {
-            "description" => set_singular(
-                &mut timeframe.description,
-                &mut timeframe.extensions,
-                child,
-                text_from_element,
-            ),
-            "earliestdate" => set_singular(
-                &mut timeframe.earliest_date,
-                &mut timeframe.extensions,
-                child,
-                text_from_element,
-            ),
-            "latestdate" => set_singular(
-                &mut timeframe.latest_date,
-                &mut timeframe.extensions,
-                child,
-                text_from_element,
-            ),
-            _ => timeframe.extensions.push(XmlNode::Element(child)),
-        }
-    }
-    timeframe
-}
-
-fn vendor_from_element<'a>(element: XmlElement<'a>) -> Vendor<'a> {
-    let XmlElement {
-        attributes,
-        children,
-        span,
-        ..
-    } = element;
-    let mut vendor = Vendor {
-        attributes,
-        span,
-        ..Default::default()
-    };
-    for node in children {
-        let Some(child) = element_child_or_extension(node, &mut vendor.extensions) else {
-            continue;
-        };
-        match child.name.as_ref() {
-            "id" => vendor.ids.push(id_from_element(child)),
-            "vendorname" => set_singular(
-                &mut vendor.vendor_name,
-                &mut vendor.extensions,
-                child,
-                text_from_element,
-            ),
-            "url" => set_singular(
-                &mut vendor.url,
-                &mut vendor.extensions,
-                child,
-                text_from_element,
-            ),
-            "contact" => vendor.contacts.push(contact_from_element(child)),
-            _ => vendor.extensions.push(XmlNode::Element(child)),
-        }
-    }
-    vendor
-}
-
-fn provider_from_element<'a>(element: XmlElement<'a>) -> Provider<'a> {
-    let XmlElement {
-        attributes,
-        children,
-        span,
-        ..
-    } = element;
-    let mut provider = Provider {
-        attributes,
-        span,
-        ..Default::default()
-    };
-    for node in children {
-        let Some(child) = element_child_or_extension(node, &mut provider.extensions) else {
-            continue;
-        };
-        match child.name.as_ref() {
-            "id" => provider.ids.push(id_from_element(child)),
-            "name" => set_singular(
-                &mut provider.name,
-                &mut provider.extensions,
-                child,
-                name_from_element,
-            ),
-            "service" => set_singular(
-                &mut provider.service,
-                &mut provider.extensions,
-                child,
-                text_from_element,
-            ),
-            "url" => set_singular(
-                &mut provider.url,
-                &mut provider.extensions,
-                child,
-                text_from_element,
-            ),
-            "email" => set_singular(
-                &mut provider.email,
-                &mut provider.extensions,
-                child,
-                text_from_element,
-            ),
-            "phone" => set_singular(
-                &mut provider.phone,
-                &mut provider.extensions,
-                child,
-                text_from_element,
-            ),
-            "contact" => provider.contacts.push(contact_from_element(child)),
-            _ => provider.extensions.push(XmlNode::Element(child)),
-        }
-    }
-    provider
-}
-
-fn contact_from_element<'a>(element: XmlElement<'a>) -> Contact<'a> {
-    let XmlElement {
-        attributes,
-        children,
-        span,
-        ..
-    } = element;
-    let mut contact = Contact {
-        primary_contact: attr(&attributes, "primarycontact"),
-        attributes,
-        span,
-        ..Default::default()
-    };
-    for node in children {
-        let Some(child) = element_child_or_extension(node, &mut contact.extensions) else {
-            continue;
-        };
-        match child.name.as_ref() {
-            "name" => contact.names.push(name_from_element(child)),
-            "email" => contact.emails.push(text_from_element(child)),
-            "phone" => contact.phones.push(text_from_element(child)),
-            "address" => contact.addresses.push(address_from_element(child)),
-            _ => contact.extensions.push(XmlNode::Element(child)),
-        }
-    }
-    contact
-}
-
-fn address_from_element<'a>(element: XmlElement<'a>) -> Address<'a> {
-    let XmlElement {
-        attributes,
-        children,
-        span,
-        ..
-    } = element;
-    let mut address = Address {
-        address_type: attr(&attributes, "type"),
-        attributes,
-        span,
-        ..Default::default()
-    };
-    for node in children {
-        let Some(child) = element_child_or_extension(node, &mut address.extensions) else {
-            continue;
-        };
-        match child.name.as_ref() {
-            "street" => address.streets.push(text_from_element(child)),
-            "apartment" => set_singular(
-                &mut address.apartment,
-                &mut address.extensions,
-                child,
-                text_from_element,
-            ),
-            "city" => set_singular(
-                &mut address.city,
-                &mut address.extensions,
-                child,
-                text_from_element,
-            ),
-            "regioncode" => set_singular(
-                &mut address.region_code,
-                &mut address.extensions,
-                child,
-                text_from_element,
-            ),
-            "postalcode" => set_singular(
-                &mut address.postal_code,
-                &mut address.extensions,
-                child,
-                text_from_element,
-            ),
-            "country" => set_singular(
-                &mut address.country,
-                &mut address.extensions,
-                child,
-                text_from_element,
-            ),
-            _ => address.extensions.push(XmlNode::Element(child)),
-        }
-    }
-    address
-}
-
-fn id_from_element<'a>(element: XmlElement<'a>) -> Id<'a> {
-    let XmlElement {
-        attributes,
-        children,
-        span,
-        ..
-    } = element;
-    Id {
-        sequence: attr(&attributes, "sequence"),
-        source: attr(&attributes, "source"),
-        parts: text_parts(children),
-        attributes,
-        span,
-    }
-}
-
-fn price_from_element<'a>(element: XmlElement<'a>) -> Price<'a> {
-    let XmlElement {
-        attributes,
-        children,
-        span,
-        ..
-    } = element;
-    Price {
-        price_type: attr(&attributes, "type"),
-        currency: attr(&attributes, "currency"),
-        delta: attr(&attributes, "delta"),
-        relative_to: attr(&attributes, "relativeto"),
-        source: attr(&attributes, "source"),
-        parts: text_parts(children),
-        attributes,
-        span,
-    }
-}
-
-fn name_from_element<'a>(element: XmlElement<'a>) -> Name<'a> {
-    let XmlElement {
-        attributes,
-        children,
-        span,
-        ..
-    } = element;
-    Name {
-        part: attr(&attributes, "part"),
-        name_type: attr(&attributes, "type"),
-        parts: text_parts(children),
-        attributes,
-        span,
-    }
-}
-
-fn text_from_element<'a>(element: XmlElement<'a>) -> TextElement<'a> {
-    let XmlElement {
-        attributes,
-        children,
-        span,
-        ..
-    } = element;
-    TextElement {
-        parts: text_parts(children),
-        attributes,
-        span,
-    }
-}
-
-fn text_parts<'a>(children: Vec<XmlNode<'a>>) -> Vec<TextPart<'a>> {
-    let mut parts = Vec::new();
-    for child in children {
-        match child {
-            XmlNode::Text(text) => parts.push(TextPart::Text(text)),
-            XmlNode::CData(text) => parts.push(TextPart::CData(text)),
-            XmlNode::EntityRef(name) => parts.push(TextPart::EntityRef(name)),
-            node => parts.push(TextPart::Node(node)),
-        }
-    }
-    parts
-}
-
 fn attr<'a>(attributes: &[Attribute<'a>], name: &str) -> Option<Cow<'a, str>> {
     attributes
         .iter()
         .find(|attr| attr.name.as_ref() == name)
         .map(|attr| attr.value.clone())
-}
-
-fn element_child_or_extension<'a>(
-    node: XmlNode<'a>,
-    extensions: &mut Vec<XmlNode<'a>>,
-) -> Option<XmlElement<'a>> {
-    match node {
-        XmlNode::Element(element) => Some(element),
-        XmlNode::Text(text) if text.as_ref().bytes().all(is_xml_whitespace) => None,
-        extension => {
-            extensions.push(extension);
-            None
-        }
-    }
-}
-
-fn set_singular<'a, T>(
-    slot: &mut Option<T>,
-    extensions: &mut Vec<XmlNode<'a>>,
-    child: XmlElement<'a>,
-    convert: impl FnOnce(XmlElement<'a>) -> T,
-) {
-    if slot.is_some() {
-        extensions.push(XmlNode::Element(child));
-    } else {
-        *slot = Some(convert(child));
-    }
 }
