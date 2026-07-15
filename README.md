@@ -127,3 +127,26 @@ cargo fmt --check
 cargo test
 cargo clippy --all-targets -- -D warnings
 ```
+
+### Parsing benchmarks
+
+The Criterion suite measures borrowed parsing, owned input paths, lazy raw-tree
+construction, and a diagnostic `quick-xml` event scan across fabricated ADF
+documents ranging from an empty root to a 1,000-prospect batch. The tokenizer
+scan is a lower-level diagnostic, not a semantically equivalent ADF parse.
+
+Run the complete suite or filter it to one benchmark group:
+
+```sh
+cargo bench --bench parsing
+cargo bench --bench parsing -- borrowed_parse
+cargo bench --bench parsing -- input_ownership
+cargo bench --bench parsing -- raw_tree
+cargo bench --bench parsing -- tokenizer_floor
+```
+
+Compile the suite without collecting timing measurements with:
+
+```sh
+cargo bench --bench parsing --no-run
+```

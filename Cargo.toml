@@ -17,9 +17,14 @@ quick-xml = "0.38.4"
 tracing = { version = "0.1.41", default-features = false, features = ["std"] }
 
 [dev-dependencies]
+criterion = { version = "0.8.2", default-features = false }
 insta = "1.43"
 pretty_assertions = "1.4"
 tracing-subscriber = { version = "0.3.20", default-features = false, features = ["fmt", "std"] }
+
+[[bench]]
+name = "parsing"
+harness = false
 
 [lints.rust]
 unsafe_code = "forbid"
