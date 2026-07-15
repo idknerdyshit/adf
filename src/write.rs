@@ -4,40 +4,140 @@ use crate::model::{
     Provider, TextElement, TextPart, Timeframe, Vehicle, VehicleOption, Vendor,
 };
 use crate::{Error, Result};
+use std::collections::HashSet;
 use std::io::Write;
 
-pub(crate) fn write_adf<W: Write>(
+/// Handling policy for unresolved custom entity references during typed writing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum UnknownEntityPolicy {
+    #[default]
+    Error,
+    Escape,
+    Preserve,
+}
+
+/// Options for normalized typed ADF output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WriteOptions {
+    pub xml_declaration: bool,
+    pub adf_processing_instruction: bool,
+    pub doctype: Option<String>,
+    pub unknown_entity_policy: UnknownEntityPolicy,
+}
+
+impl Default for WriteOptions {
+    fn default() -> Self {
+        Self {
+            xml_declaration: true,
+            adf_processing_instruction: true,
+            doctype: None,
+            unknown_entity_policy: UnknownEntityPolicy::Error,
+        }
+    }
+}
+
+impl WriteOptions {
+    #[must_use]
+    pub fn xml_declaration(mut self, enabled: bool) -> Self {
+        self.xml_declaration = enabled;
+        self
+    }
+    #[must_use]
+    pub fn adf_processing_instruction(mut self, enabled: bool) -> Self {
+        self.adf_processing_instruction = enabled;
+        self
+    }
+    #[must_use]
+    pub fn doctype(mut self, value: impl Into<String>) -> Self {
+        self.doctype = Some(value.into());
+        self
+    }
+    #[must_use]
+    pub fn without_doctype(mut self) -> Self {
+        self.doctype = None;
+        self
+    }
+    #[must_use]
+    pub fn unknown_entity_policy(mut self, policy: UnknownEntityPolicy) -> Self {
+        self.unknown_entity_policy = policy;
+        self
+    }
+}
+
+struct Output<'a> {
+    writer: &'a mut dyn Write,
+    entity_policy: UnknownEntityPolicy,
+    declared_entities: Option<&'a HashSet<String>>,
+}
+
+impl Write for Output<'_> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.writer.write(buffer)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
+}
+
+pub(crate) fn write_adf<W: Write>(writer: W, adf: &Adf<'_>) -> Result<()> {
+    write_adf_with(writer, adf, &WriteOptions::default())
+}
+
+pub(crate) fn write_adf_with<W: Write>(
     mut writer: W,
     adf: &Adf<'_>,
-    prolog: &[XmlNode<'_>],
-    epilog: &[XmlNode<'_>],
+    options: &WriteOptions,
 ) -> Result<()> {
-    writer.write_all(br#"<?xml version="1.0"?>"#)?;
-    writer.write_all(b"\n<?adf version=\"1.0\"?>")?;
-    write_document_misc(&mut writer, prolog)?;
-    start_with_attrs(&mut writer, "adf", &adf.attributes)?;
+    let declared_entities = options
+        .doctype
+        .as_deref()
+        .map(declared_general_entities_from_doctype);
+    let mut output = Output {
+        writer: &mut writer,
+        entity_policy: options.unknown_entity_policy,
+        declared_entities: declared_entities.as_ref(),
+    };
+    if options.xml_declaration {
+        output.write_all(br#"<?xml version="1.0"?>"#)?;
+    }
+    if options.adf_processing_instruction {
+        output.write_all(b"\n<?adf version=\"1.0\"?>")?;
+    }
+    if let Some(doctype) = &options.doctype {
+        validate_doctype(doctype)?;
+        output.write_all(b"\n<!DOCTYPE ")?;
+        output.write_all(doctype.as_bytes())?;
+        output.write_all(b">")?;
+    }
+    write_adf_root(&mut output, adf)
+}
+
+fn write_adf_root(writer: &mut Output<'_>, adf: &Adf<'_>) -> Result<()> {
+    start_with_attrs(writer, "adf", &adf.attributes)?;
     if adf.extensions.is_empty() {
         for prospect in &adf.prospects {
-            write_prospect(&mut writer, prospect)?;
+            write_prospect(writer, prospect)?;
         }
-    } else {
-        let mut children = Vec::new();
-        for prospect in &adf.prospects {
-            children.push(Child::Prospect {
-                value: prospect,
-                order: 0,
-            });
-        }
-        for extension in &adf.extensions {
-            children.push(Child::Extension {
-                value: extension,
-                order: 1,
-            });
-        }
-        write_children(&mut writer, &mut children)?;
+        writer.write_all(b"\n</adf>")?;
+        return Ok(());
     }
+    let mut children = Vec::new();
+    for prospect in &adf.prospects {
+        children.push(Child::Prospect {
+            value: prospect,
+            order: 0,
+        });
+    }
+    for extension in &adf.extensions {
+        children.push(Child::Extension {
+            value: extension,
+            order: 1,
+        });
+    }
+    write_children(writer, &mut children)?;
     writer.write_all(b"\n</adf>")?;
-    write_document_misc(&mut writer, epilog)?;
     Ok(())
 }
 
@@ -50,41 +150,188 @@ pub(crate) fn write_original_preserving<W: Write>(
             reason = "dirty_all",
             "original-preserving write using typed writer"
         );
-        return write_adf(writer, &document.adf, &document.prolog, &document.epilog);
+        return write_document_typed(writer, document);
+    }
+    if document
+        .dirty_prospects
+        .iter()
+        .enumerate()
+        .any(|(index, dirty)| {
+            *dirty
+                && (document.prospect_spans.get(index).is_none()
+                    || document.adf.prospects.get(index).is_none())
+        })
+    {
+        tracing::debug!(
+            reason = "prospect_index_mismatch",
+            "original-preserving write using typed writer"
+        );
+        return write_document_typed(writer, document);
     }
 
+    let mut output = Output {
+        writer: &mut writer,
+        entity_policy: UnknownEntityPolicy::Preserve,
+        declared_entities: None,
+    };
     let mut cursor = 0;
     for (index, dirty) in document.dirty_prospects.iter().enumerate() {
         if !dirty {
             continue;
         }
-        let Some(span) = document.prospect_spans.get(index) else {
-            tracing::debug!(
-                reason = "missing_prospect_span",
-                prospect_index = index,
-                "original-preserving write using typed writer"
-            );
-            return write_adf(writer, &document.adf, &document.prolog, &document.epilog);
-        };
-        let Some(prospect) = document.adf.prospects.get(index) else {
-            tracing::debug!(
-                reason = "missing_prospect",
-                prospect_index = index,
-                "original-preserving write using typed writer"
-            );
-            return write_adf(writer, &document.adf, &document.prolog, &document.epilog);
-        };
+        let span = &document.prospect_spans[index];
+        let prospect = &document.adf.prospects[index];
 
-        writer.write_all(&document.original.as_bytes()[cursor..span.start])?;
-        write_prospect(&mut writer, prospect)?;
+        output.write_all(&document.original.as_bytes()[cursor..span.start])?;
+        write_prospect(&mut output, prospect)?;
         cursor = span.end;
     }
 
-    writer.write_all(&document.original.as_bytes()[cursor..])?;
+    output.write_all(&document.original.as_bytes()[cursor..])?;
     Ok(())
 }
 
-pub(crate) fn write_prospect<W: Write>(writer: &mut W, prospect: &Prospect<'_>) -> Result<()> {
+pub(crate) fn write_document_typed<W: Write>(
+    mut writer: W,
+    document: &AdfDocument<'_>,
+) -> Result<()> {
+    let declared_entities = declared_general_entities(&document.prolog);
+    let mut output = Output {
+        writer: &mut writer,
+        entity_policy: UnknownEntityPolicy::Error,
+        declared_entities: Some(&declared_entities),
+    };
+    write_document_typed_inner(&mut output, document)
+}
+
+fn declared_general_entities(prolog: &[XmlNode<'_>]) -> HashSet<String> {
+    let mut entities = HashSet::new();
+    for node in prolog {
+        let XmlNode::DocType(value) = node else {
+            continue;
+        };
+        entities.extend(declared_general_entities_from_doctype(value));
+    }
+    entities
+}
+
+fn declared_general_entities_from_doctype(value: &str) -> HashSet<String> {
+    let mut entities = HashSet::new();
+    let bytes = value.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if bytes[cursor..].starts_with(b"<!--") {
+            cursor = bytes[cursor + 4..]
+                .windows(3)
+                .position(|window| window == b"-->")
+                .map_or(bytes.len(), |offset| cursor + 4 + offset + 3);
+            continue;
+        }
+        if bytes[cursor..].starts_with(b"<?") {
+            cursor = bytes[cursor + 2..]
+                .windows(2)
+                .position(|window| window == b"?>")
+                .map_or(bytes.len(), |offset| cursor + 2 + offset + 2);
+            continue;
+        }
+        if matches!(bytes[cursor], b'\'' | b'"') {
+            let quote = bytes[cursor];
+            cursor += 1;
+            while cursor < bytes.len() && bytes[cursor] != quote {
+                cursor += 1;
+            }
+            cursor = cursor.saturating_add(1);
+            continue;
+        }
+        if !bytes[cursor..].starts_with(b"<!ENTITY") {
+            cursor += 1;
+            continue;
+        }
+
+        cursor += b"<!ENTITY".len();
+        if !bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            continue;
+        }
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        if bytes.get(cursor) == Some(&b'%') {
+            continue;
+        }
+        let name_start = cursor;
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| !byte.is_ascii_whitespace() && *byte != b'>')
+        {
+            cursor += 1;
+        }
+        let Some(name) = value.get(name_start..cursor) else {
+            continue;
+        };
+        if bytes.get(cursor).is_some_and(u8::is_ascii_whitespace)
+            && crate::parse::ensure_entity_name(name, 0).is_ok()
+        {
+            entities.insert(name.to_owned());
+        }
+    }
+    entities
+}
+
+fn write_document_typed_inner(output: &mut Output<'_>, document: &AdfDocument<'_>) -> Result<()> {
+    if let Some(declaration) = document
+        .prolog
+        .iter()
+        .find(|node| matches!(node, XmlNode::Declaration(_)))
+    {
+        write_xml_node(output, declaration)?;
+    } else {
+        output.write_all(br#"<?xml version="1.0"?>"#)?;
+    }
+    output.write_all(b"\n")?;
+    if let Some(adf_pi) = document
+        .prolog
+        .iter()
+        .find(|node| is_adf_processing_instruction(node))
+    {
+        write_xml_node(output, adf_pi)?;
+    } else {
+        output.write_all(b"<?adf version=\"1.0\"?>")?;
+    }
+    for node in &document.prolog {
+        if is_document_whitespace(node)
+            || matches!(node, XmlNode::Declaration(_))
+            || is_adf_processing_instruction(node)
+        {
+            continue;
+        }
+        output.write_all(b"\n")?;
+        write_xml_node(output, node)?;
+    }
+    write_adf_root(output, &document.adf)?;
+    for node in &document.epilog {
+        if !is_document_whitespace(node) {
+            output.write_all(b"\n")?;
+            write_xml_node(output, node)?;
+        }
+    }
+    Ok(())
+}
+
+fn is_adf_processing_instruction(node: &XmlNode<'_>) -> bool {
+    let XmlNode::ProcessingInstruction(value) = node else {
+        return false;
+    };
+    value
+        .split_ascii_whitespace()
+        .next()
+        .is_some_and(|target| target.eq_ignore_ascii_case("adf"))
+}
+
+fn is_document_whitespace(node: &XmlNode<'_>) -> bool {
+    matches!(node, XmlNode::Text(value) if value.trim().is_empty())
+}
+
+fn write_prospect(writer: &mut Output<'_>, prospect: &Prospect<'_>) -> Result<()> {
     let known = [("status", prospect.status.as_deref())];
     start_preserving_known(writer, "prospect", &prospect.attributes, &known)?;
     if prospect.extensions.is_empty() {
@@ -148,7 +395,7 @@ pub(crate) fn write_prospect<W: Write>(writer: &mut W, prospect: &Prospect<'_>) 
     end(writer, "prospect")
 }
 
-fn write_vehicle<W: Write>(writer: &mut W, vehicle: &Vehicle<'_>) -> Result<()> {
+fn write_vehicle(writer: &mut Output<'_>, vehicle: &Vehicle<'_>) -> Result<()> {
     let known = [
         ("interest", vehicle.interest.as_deref()),
         ("status", vehicle.status.as_deref()),
@@ -249,7 +496,7 @@ fn write_vehicle<W: Write>(writer: &mut W, vehicle: &Vehicle<'_>) -> Result<()> 
     end(writer, "vehicle")
 }
 
-fn write_color_combination<W: Write>(writer: &mut W, colors: &ColorCombination<'_>) -> Result<()> {
+fn write_color_combination(writer: &mut Output<'_>, colors: &ColorCombination<'_>) -> Result<()> {
     start_with_attrs(writer, "colorcombination", &colors.attributes)?;
     if colors.extensions.is_empty() {
         write_opt_text(writer, "interiorcolor", &colors.interior_color)?;
@@ -271,7 +518,7 @@ fn write_color_combination<W: Write>(writer: &mut W, colors: &ColorCombination<'
     end(writer, "colorcombination")
 }
 
-fn write_option<W: Write>(writer: &mut W, option: &VehicleOption<'_>) -> Result<()> {
+fn write_option(writer: &mut Output<'_>, option: &VehicleOption<'_>) -> Result<()> {
     start_with_attrs(writer, "option", &option.attributes)?;
     if option.extensions.is_empty() {
         write_opt_text(writer, "optionname", &option.option_name)?;
@@ -309,7 +556,7 @@ fn write_option<W: Write>(writer: &mut W, option: &VehicleOption<'_>) -> Result<
     end(writer, "option")
 }
 
-fn write_finance<W: Write>(writer: &mut W, finance: &Finance<'_>) -> Result<()> {
+fn write_finance(writer: &mut Output<'_>, finance: &Finance<'_>) -> Result<()> {
     start_with_attrs(writer, "finance", &finance.attributes)?;
     if finance.extensions.is_empty() {
         write_opt_text(writer, "method", &finance.method)?;
@@ -347,7 +594,7 @@ fn write_finance<W: Write>(writer: &mut W, finance: &Finance<'_>) -> Result<()> 
     end(writer, "finance")
 }
 
-fn write_customer<W: Write>(writer: &mut W, customer: &Customer<'_>) -> Result<()> {
+fn write_customer(writer: &mut Output<'_>, customer: &Customer<'_>) -> Result<()> {
     start_with_attrs(writer, "customer", &customer.attributes)?;
     if customer.extensions.is_empty() {
         for contact in &customer.contacts {
@@ -392,7 +639,7 @@ fn write_customer<W: Write>(writer: &mut W, customer: &Customer<'_>) -> Result<(
     end(writer, "customer")
 }
 
-fn write_timeframe<W: Write>(writer: &mut W, timeframe: &Timeframe<'_>) -> Result<()> {
+fn write_timeframe(writer: &mut Output<'_>, timeframe: &Timeframe<'_>) -> Result<()> {
     start_with_attrs(writer, "timeframe", &timeframe.attributes)?;
     if timeframe.extensions.is_empty() {
         write_opt_text(writer, "description", &timeframe.description)?;
@@ -414,7 +661,7 @@ fn write_timeframe<W: Write>(writer: &mut W, timeframe: &Timeframe<'_>) -> Resul
     end(writer, "timeframe")
 }
 
-fn write_vendor<W: Write>(writer: &mut W, vendor: &Vendor<'_>) -> Result<()> {
+fn write_vendor(writer: &mut Output<'_>, vendor: &Vendor<'_>) -> Result<()> {
     start_with_attrs(writer, "vendor", &vendor.attributes)?;
     if vendor.extensions.is_empty() {
         for id in &vendor.ids {
@@ -452,7 +699,7 @@ fn write_vendor<W: Write>(writer: &mut W, vendor: &Vendor<'_>) -> Result<()> {
     end(writer, "vendor")
 }
 
-fn write_provider<W: Write>(writer: &mut W, provider: &Provider<'_>) -> Result<()> {
+fn write_provider(writer: &mut Output<'_>, provider: &Provider<'_>) -> Result<()> {
     start_with_attrs(writer, "provider", &provider.attributes)?;
     if provider.extensions.is_empty() {
         for id in &provider.ids {
@@ -503,7 +750,7 @@ fn write_provider<W: Write>(writer: &mut W, provider: &Provider<'_>) -> Result<(
     end(writer, "provider")
 }
 
-fn write_contact<W: Write>(writer: &mut W, contact: &Contact<'_>) -> Result<()> {
+fn write_contact(writer: &mut Output<'_>, contact: &Contact<'_>) -> Result<()> {
     let known = [("primarycontact", contact.primary_contact.as_deref())];
     start_preserving_known(writer, "contact", &contact.attributes, &known)?;
     if contact.extensions.is_empty() {
@@ -558,7 +805,7 @@ fn write_contact<W: Write>(writer: &mut W, contact: &Contact<'_>) -> Result<()> 
     end(writer, "contact")
 }
 
-fn write_address<W: Write>(writer: &mut W, address: &Address<'_>) -> Result<()> {
+fn write_address(writer: &mut Output<'_>, address: &Address<'_>) -> Result<()> {
     let known = [("type", address.address_type.as_deref())];
     start_preserving_known(writer, "address", &address.attributes, &known)?;
     if address.extensions.is_empty() {
@@ -595,7 +842,7 @@ fn write_address<W: Write>(writer: &mut W, address: &Address<'_>) -> Result<()> 
     end(writer, "address")
 }
 
-fn write_id<W: Write>(writer: &mut W, id: &Id<'_>) -> Result<()> {
+fn write_id(writer: &mut Output<'_>, id: &Id<'_>) -> Result<()> {
     let known = [
         ("sequence", id.sequence.as_deref()),
         ("source", id.source.as_deref()),
@@ -603,7 +850,7 @@ fn write_id<W: Write>(writer: &mut W, id: &Id<'_>) -> Result<()> {
     write_parts(writer, "id", &id.attributes, &known, &id.parts)
 }
 
-fn write_price<W: Write>(writer: &mut W, price: &Price<'_>) -> Result<()> {
+fn write_price(writer: &mut Output<'_>, price: &Price<'_>) -> Result<()> {
     let known = [
         ("type", price.price_type.as_deref()),
         ("currency", price.currency.as_deref()),
@@ -614,7 +861,7 @@ fn write_price<W: Write>(writer: &mut W, price: &Price<'_>) -> Result<()> {
     write_parts(writer, "price", &price.attributes, &known, &price.parts)
 }
 
-fn write_name<W: Write>(writer: &mut W, name: &Name<'_>) -> Result<()> {
+fn write_name(writer: &mut Output<'_>, name: &Name<'_>) -> Result<()> {
     let known = [
         ("part", name.part.as_deref()),
         ("type", name.name_type.as_deref()),
@@ -749,7 +996,7 @@ fn push_opt_text<'model, 'input>(
     }
 }
 
-fn write_children<W: Write>(writer: &mut W, children: &mut [Child<'_, '_>]) -> Result<()> {
+fn write_children(writer: &mut Output<'_>, children: &mut [Child<'_, '_>]) -> Result<()> {
     let mut known_spans: Vec<_> = children
         .iter()
         .filter(|child| !child.is_extension())
@@ -763,28 +1010,32 @@ fn write_children<W: Write>(writer: &mut W, children: &mut [Child<'_, '_>]) -> R
         })
         .collect();
     known_spans.sort_by_key(|(start, _)| *start);
+    let mut max_order = 0;
+    for (_, order) in &mut known_spans {
+        max_order = max_order.max(*order);
+        *order = max_order;
+    }
 
     children.sort_by_cached_key(|child| {
         let span = child.span();
         if span.start == 0 && span.end == 0 {
-            return (child.order(), 1, usize::MAX);
+            return (1, child.order(), usize::MAX);
         }
 
         if child.is_extension() {
             let index = known_spans.partition_point(|(known_start, _)| *known_start < span.start);
-            let order = if let Some((_, previous_order)) = index
-                .checked_sub(1)
-                .and_then(|previous| known_spans.get(previous))
-            {
-                *previous_order
-            } else if let Some((_, next_order)) = known_spans.get(index) {
-                *next_order
+            let order = if index == 0 {
+                1
             } else {
-                child.order()
+                known_spans[index - 1].1.saturating_mul(2).saturating_add(3)
             };
-            (order, 0, span.start)
+            (0, order, span.start)
         } else {
-            (child.order(), 0, span.start)
+            (
+                0,
+                child.order().saturating_mul(2).saturating_add(2),
+                span.start,
+            )
         }
     });
 
@@ -825,8 +1076,8 @@ fn xml_node_span(node: &XmlNode<'_>) -> Span {
     }
 }
 
-fn write_opt_text<W: Write>(
-    writer: &mut W,
+fn write_opt_text(
+    writer: &mut Output<'_>,
     name: &str,
     value: &Option<TextElement<'_>>,
 ) -> Result<()> {
@@ -836,12 +1087,12 @@ fn write_opt_text<W: Write>(
     Ok(())
 }
 
-fn write_text<W: Write>(writer: &mut W, name: &str, value: &TextElement<'_>) -> Result<()> {
+fn write_text(writer: &mut Output<'_>, name: &str, value: &TextElement<'_>) -> Result<()> {
     write_parts(writer, name, &value.attributes, &[], &value.parts)
 }
 
-fn write_parts<W: Write>(
-    writer: &mut W,
+fn write_parts(
+    writer: &mut Output<'_>,
     name: &str,
     attributes: &[Attribute<'_>],
     known: &[(&'static str, Option<&str>)],
@@ -852,16 +1103,13 @@ fn write_parts<W: Write>(
     end(writer, name)
 }
 
-fn write_text_parts<W: Write>(writer: &mut W, parts: &[TextPart<'_>]) -> Result<()> {
+fn write_text_parts(writer: &mut Output<'_>, parts: &[TextPart<'_>]) -> Result<()> {
     for part in parts {
         match part {
             TextPart::Text(text) => write_escaped_text(writer, text)?,
             TextPart::CData(text) => write_cdata(writer, text)?,
             TextPart::EntityRef(name) => {
-                crate::parse::ensure_entity_name(name, 0)?;
-                writer.write_all(b"&")?;
-                writer.write_all(name.as_bytes())?;
-                writer.write_all(b";")?;
+                write_entity_ref(writer, name)?;
             }
             TextPart::Node(node) => write_xml_node(writer, node)?,
         }
@@ -869,7 +1117,7 @@ fn write_text_parts<W: Write>(writer: &mut W, parts: &[TextPart<'_>]) -> Result<
     Ok(())
 }
 
-fn write_cdata<W: Write>(writer: &mut W, text: &str) -> Result<()> {
+fn write_cdata(writer: &mut Output<'_>, text: &str) -> Result<()> {
     validate_xml_chars(text)?;
     let mut remaining = text;
     loop {
@@ -888,39 +1136,12 @@ fn write_cdata<W: Write>(writer: &mut W, text: &str) -> Result<()> {
     }
 }
 
-fn write_document_misc<W: Write>(writer: &mut W, nodes: &[XmlNode<'_>]) -> Result<()> {
-    for node in nodes {
-        match node {
-            XmlNode::Declaration(_) => {}
-            XmlNode::Text(text) if text.bytes().all(|byte| byte.is_ascii_whitespace()) => {}
-            XmlNode::ProcessingInstruction(pi) if pi.split_whitespace().next() == Some("adf") => {}
-            XmlNode::DocType(doc_type) => {
-                validate_xml_chars(doc_type)?;
-                writer.write_all(b"\n<!DOCTYPE ")?;
-                writer.write_all(doc_type.as_bytes())?;
-                writer.write_all(b">")?;
-            }
-            node => {
-                writer.write_all(b"\n")?;
-                write_xml_node(writer, node)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn write_xml_node<W: Write>(writer: &mut W, node: &XmlNode<'_>) -> Result<()> {
+fn write_xml_node(writer: &mut Output<'_>, node: &XmlNode<'_>) -> Result<()> {
     match node {
         XmlNode::Element(element) => write_xml_element(writer, element),
         XmlNode::Text(text) => write_escaped_text(writer, text),
         XmlNode::CData(text) => write_cdata(writer, text),
-        XmlNode::EntityRef(name) => {
-            crate::parse::ensure_entity_name(name, 0)?;
-            writer.write_all(b"&")?;
-            writer.write_all(name.as_bytes())?;
-            writer.write_all(b";")?;
-            Ok(())
-        }
+        XmlNode::EntityRef(name) => write_entity_ref(writer, name),
         XmlNode::Comment(comment) => {
             validate_comment(comment)?;
             writer.write_all(b"<!--")?;
@@ -943,7 +1164,7 @@ fn write_xml_node<W: Write>(writer: &mut W, node: &XmlNode<'_>) -> Result<()> {
             Ok(())
         }
         XmlNode::DocType(doc_type) => {
-            validate_wrapped_token("DOCTYPE", doc_type, ">")?;
+            validate_doctype(doc_type)?;
             writer.write_all(b"<!DOCTYPE ")?;
             writer.write_all(doc_type.as_bytes())?;
             writer.write_all(b">")?;
@@ -952,7 +1173,32 @@ fn write_xml_node<W: Write>(writer: &mut W, node: &XmlNode<'_>) -> Result<()> {
     }
 }
 
-fn write_xml_element<W: Write>(writer: &mut W, element: &XmlElement<'_>) -> Result<()> {
+fn write_entity_ref(writer: &mut Output<'_>, name: &str) -> Result<()> {
+    crate::parse::ensure_entity_name(name, 0)?;
+    if writer
+        .declared_entities
+        .is_some_and(|entities| entities.contains(name))
+    {
+        writer.write_all(b"&")?;
+        writer.write_all(name.as_bytes())?;
+        writer.write_all(b";")?;
+        return Ok(());
+    }
+    match writer.entity_policy {
+        UnknownEntityPolicy::Error => Err(Error::UndeclaredEntityReference {
+            name: name.to_owned(),
+        }),
+        UnknownEntityPolicy::Escape => write_escaped_text(writer, &format!("&{name};")),
+        UnknownEntityPolicy::Preserve => {
+            writer.write_all(b"&")?;
+            writer.write_all(name.as_bytes())?;
+            writer.write_all(b";")?;
+            Ok(())
+        }
+    }
+}
+
+fn write_xml_element(writer: &mut Output<'_>, element: &XmlElement<'_>) -> Result<()> {
     start_with_attrs(writer, &element.name, &element.attributes)?;
     for child in &element.children {
         write_xml_node(writer, child)?;
@@ -960,8 +1206,8 @@ fn write_xml_element<W: Write>(writer: &mut W, element: &XmlElement<'_>) -> Resu
     end(writer, &element.name)
 }
 
-fn start_with_attrs<W: Write>(
-    writer: &mut W,
+fn start_with_attrs(
+    writer: &mut Output<'_>,
     name: &str,
     attributes: &[Attribute<'_>],
 ) -> Result<()> {
@@ -973,8 +1219,8 @@ fn start_with_attrs<W: Write>(
     Ok(())
 }
 
-fn start_preserving_known<W: Write>(
-    writer: &mut W,
+fn start_preserving_known(
+    writer: &mut Output<'_>,
     name: &str,
     attributes: &[Attribute<'_>],
     known: &[(&'static str, Option<&str>)],
@@ -1000,10 +1246,10 @@ fn start_preserving_known<W: Write>(
 
     for (index, (name, value)) in known.iter().enumerate() {
         let bit = 1_u64 << index;
-        if emitted & bit == 0 {
-            if let Some(value) = value {
-                write_attr(writer, name, value)?;
-            }
+        if emitted & bit == 0
+            && let Some(value) = value
+        {
+            write_attr(writer, name, value)?;
         }
     }
 
@@ -1011,14 +1257,14 @@ fn start_preserving_known<W: Write>(
     Ok(())
 }
 
-fn start_open<W: Write>(writer: &mut W, name: &str) -> Result<()> {
+fn start_open(writer: &mut Output<'_>, name: &str) -> Result<()> {
     validate_name(name, "element")?;
     writer.write_all(b"\n<")?;
     writer.write_all(name.as_bytes())?;
     Ok(())
 }
 
-fn write_attr<W: Write>(writer: &mut W, name: &str, value: &str) -> Result<()> {
+fn write_attr(writer: &mut Output<'_>, name: &str, value: &str) -> Result<()> {
     validate_name(name, "attribute")?;
     writer.write_all(b" ")?;
     writer.write_all(name.as_bytes())?;
@@ -1028,7 +1274,7 @@ fn write_attr<W: Write>(writer: &mut W, name: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn end<W: Write>(writer: &mut W, name: &str) -> Result<()> {
+fn end(writer: &mut Output<'_>, name: &str) -> Result<()> {
     validate_name(name, "element")?;
     writer.write_all(b"</")?;
     writer.write_all(name.as_bytes())?;
@@ -1036,12 +1282,12 @@ fn end<W: Write>(writer: &mut W, name: &str) -> Result<()> {
     Ok(())
 }
 
-fn write_escaped_text<W: Write>(writer: &mut W, value: &str) -> Result<()> {
+fn write_escaped_text(writer: &mut Output<'_>, value: &str) -> Result<()> {
     validate_xml_chars(value)?;
     write_escaped(writer, value, text_escape)
 }
 
-fn write_escaped_attr<W: Write>(writer: &mut W, value: &str) -> Result<()> {
+fn write_escaped_attr(writer: &mut Output<'_>, value: &str) -> Result<()> {
     validate_xml_chars(value)?;
     write_escaped(writer, value, attr_escape)
 }
@@ -1104,8 +1350,40 @@ fn validate_wrapped_token(kind: &'static str, value: &str, forbidden: &'static s
     Ok(())
 }
 
-fn write_escaped<W: Write>(
-    writer: &mut W,
+fn validate_doctype(value: &str) -> Result<()> {
+    validate_xml_chars(value)?;
+    if value.trim().is_empty() {
+        return Err(Error::InvalidXmlToken {
+            kind: "DOCTYPE",
+            reason: "value is empty",
+        });
+    }
+    let probe = format!("<!DOCTYPE {value}><adf/>");
+    let options = crate::ParseOptions::default()
+        .without_doctype_limit()
+        .without_input_limit()
+        .without_depth_limit()
+        .without_node_limit()
+        .without_attribute_limit();
+    let valid = crate::parse::parse_document_tree(&probe, &options)
+        .ok()
+        .is_some_and(|document| {
+            matches!(
+                document.prolog.as_slice(),
+                [XmlNode::DocType(parsed)] if parsed.as_ref() == value
+            )
+        });
+    if !valid {
+        return Err(Error::InvalidXmlToken {
+            kind: "DOCTYPE",
+            reason: "payload is not one complete XML DOCTYPE declaration",
+        });
+    }
+    Ok(())
+}
+
+fn write_escaped(
+    writer: &mut Output<'_>,
     value: &str,
     escape: fn(u8) -> Option<&'static [u8]>,
 ) -> Result<()> {

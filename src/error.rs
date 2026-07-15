@@ -1,3 +1,4 @@
+use crate::parse::ParseLimit;
 use std::fmt;
 
 /// Crate result type.
@@ -21,6 +22,8 @@ pub enum Error {
         position: u64,
         source: quick_xml::encoding::EncodingError,
     },
+    /// XML declared an encoding other than UTF-8.
+    UnsupportedEncoding { encoding: String, position: u64 },
     /// UTF-8 decoding error for XML names or event payloads.
     Utf8 {
         position: u64,
@@ -42,6 +45,8 @@ pub enum Error {
     InvalidCharacterReference { reference: String, position: u64 },
     /// An entity reference was malformed.
     InvalidEntityReference { reference: String, position: u64 },
+    /// Typed output contained a custom entity without a declaration policy.
+    UndeclaredEntityReference { name: String },
     /// XML text contained a Unicode scalar value that XML does not permit.
     IllegalCharacter { character: char, position: u64 },
     /// XML name token was invalid for the context.
@@ -57,6 +62,13 @@ pub enum Error {
     DocTypeTooLong {
         length: usize,
         limit: usize,
+        position: u64,
+    },
+    /// A configured parser resource limit was exceeded.
+    LimitExceeded {
+        limit: ParseLimit,
+        maximum: usize,
+        actual: usize,
         position: u64,
     },
     /// No XML root element was found.
@@ -88,6 +100,12 @@ impl fmt::Display for Error {
             }
             Error::Encoding { position, source } => {
                 write!(f, "XML encoding error at byte {position}: {source}")
+            }
+            Error::UnsupportedEncoding { encoding, position } => {
+                write!(
+                    f,
+                    "unsupported XML encoding {encoding:?} at byte {position}; expected UTF-8"
+                )
             }
             Error::Utf8 { position, source } => {
                 write!(f, "UTF-8 error at byte {position}: {source}")
@@ -133,6 +151,9 @@ impl fmt::Display for Error {
                     "invalid XML entity reference &{reference}; at byte {position}"
                 )
             }
+            Error::UndeclaredEntityReference { name } => {
+                write!(f, "cannot write undeclared custom entity &{name};")
+            }
             Error::IllegalCharacter {
                 character,
                 position,
@@ -155,6 +176,15 @@ impl fmt::Display for Error {
             } => write!(
                 f,
                 "DOCTYPE declaration of {length} bytes exceeds the limit of {limit} bytes at byte {position}"
+            ),
+            Error::LimitExceeded {
+                limit,
+                maximum,
+                actual,
+                position,
+            } => write!(
+                f,
+                "XML {limit:?} limit of {maximum} exceeded by {actual} at byte {position}"
             ),
             Error::MissingRoot => f.write_str("document does not contain a root element"),
             Error::MultipleRoots => f.write_str("document contains more than one root element"),

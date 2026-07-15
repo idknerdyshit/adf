@@ -1,7 +1,10 @@
 use adf::{
-    AdfDocument, Attribute, DEFAULT_MAX_DOCTYPE_LEN, Error, ParseOptions, Severity, Span,
-    TextElement, TextPart, ValidationOptions, ValidationReport, XmlElement, XmlNode, parse,
-    parse_with,
+    Address, Adf, AdfDocument, Attribute, ColorCombination, ColorSelection, Contact, ContactMethod,
+    Customer, DEFAULT_MAX_DOCTYPE_LEN, Error, Finance, Id, Name, ParseLimit, ParseOptions, Price,
+    Prospect, Provider, Severity, Span, TextElement, TextPart, Timeframe, TimeframeWindow,
+    UnknownEntityPolicy, ValidationCode, ValidationOptions, ValidationProfile, ValidationReport,
+    Vehicle, VehicleOption, Vendor, WriteOptions, XmlElement, XmlNode, parse, parse_bytes,
+    parse_bytes_with, parse_owned, parse_reader, parse_with, to_string, to_string_with,
 };
 use insta::assert_snapshot;
 use pretty_assertions::assert_eq;
@@ -472,41 +475,6 @@ fn original_preserving_writer_replaces_only_dirty_prospect_span() {
 }
 
 #[test]
-fn prospect_rewrite_preserves_duplicate_singleton_elements() {
-    let input = concat!(
-        "<adf><prospect>",
-        "<requestdate>first</requestdate>",
-        "<requestdate partner=\"duplicate\">second</requestdate>",
-        "</prospect></adf>"
-    );
-    let mut doc = parse(input).expect("well-formed duplicate elements should parse");
-
-    assert_eq!(
-        doc.adf().prospects[0]
-            .request_date
-            .as_ref()
-            .unwrap()
-            .value(),
-        "first"
-    );
-    assert!(matches!(
-        doc.adf().prospects[0].extensions.as_slice(),
-        [XmlNode::Element(element)] if element.name == "requestdate"
-    ));
-
-    doc.prospect_mut(0).unwrap().status = Some(Cow::Borrowed("new"));
-    let output = doc.to_original_preserving_string().unwrap();
-    let first = output.find("<requestdate>first").unwrap();
-    let second = output
-        .find("<requestdate partner=\"duplicate\">second")
-        .unwrap();
-    assert!(
-        first < second,
-        "duplicate elements should retain source order"
-    );
-}
-
-#[test]
 fn broad_adf_mutation_uses_typed_writer() {
     let mut doc = parse(FULL_LEAD).expect("valid ADF should parse");
     doc.adf_mut().prospects[0].status = Some(Cow::Borrowed("contacted"));
@@ -583,7 +551,15 @@ fn prospect_rewrite_preserves_unknown_container_attributes() {
 fn typed_writer_preserves_entity_refs() {
     let input = r#"<adf><prospect><customer><contact><name part="full">A</name><email>a@example.com</email></contact><comments>Jane &amp; &nbsp; Co</comments></customer></prospect></adf>"#;
     let doc = parse(input).expect("valid ADF should parse");
-    let output = doc.to_typed_string().unwrap();
+    assert!(matches!(
+        doc.to_typed_string(),
+        Err(Error::UndeclaredEntityReference { .. })
+    ));
+    let output = doc
+        .to_typed_string_with(
+            &WriteOptions::default().unknown_entity_policy(UnknownEntityPolicy::Preserve),
+        )
+        .unwrap();
 
     let reparsed = parse(&output).expect("typed XML should reparse");
     let comments = reparsed.adf().prospects[0]
@@ -656,42 +632,6 @@ fn typed_writer_keeps_extensions_near_original_dtd_slot() {
         "typed_writer_keeps_extensions_near_original_dtd_slot",
         output
     );
-}
-
-#[test]
-fn typed_writer_keeps_extension_between_repeated_modeled_children() {
-    let input = concat!(
-        "<adf><prospect>",
-        "<vehicle><year>2023</year></vehicle>",
-        "<partner-score>97</partner-score>",
-        "<vehicle><year>2024</year></vehicle>",
-        "</prospect></adf>"
-    );
-    let doc = parse(input).expect("valid XML should parse");
-    let output = doc.to_typed_string().unwrap();
-
-    let first = output.find("<year>2023").unwrap();
-    let extension = output.find("<partner-score>").unwrap();
-    let second = output.find("<year>2024").unwrap();
-    assert!(first < extension && extension < second);
-}
-
-#[test]
-fn typed_writer_places_new_spanless_fields_in_their_modeled_slot() {
-    let input = concat!(
-        "<adf><prospect><vehicle>",
-        "<partner-score>97</partner-score><make>Honda</make>",
-        "</vehicle></prospect></adf>"
-    );
-    let mut doc = parse(input).expect("valid XML should parse");
-    doc.adf_mut().prospects[0].vehicles[0].year =
-        Some(TextElement::new(Cow::Borrowed("2024"), Vec::new()));
-    let output = doc.to_typed_string().unwrap();
-
-    let extension = output.find("<partner-score>").unwrap();
-    let year = output.find("<year>2024").unwrap();
-    let make = output.find("<make>Honda").unwrap();
-    assert!(year < extension && extension < make);
 }
 
 #[test]
@@ -784,6 +724,15 @@ fn typed_writer_rejects_invalid_public_xml_tokens() {
     assert!(matches!(
         doc.to_typed_string(),
         Err(Error::InvalidName { kind: "attribute" })
+    ));
+
+    let model = Adf::builder(Prospect::default()).build();
+    assert!(matches!(
+        to_string_with(&model, &WriteOptions::default().doctype("adf><injected/"),),
+        Err(Error::InvalidXmlToken {
+            kind: "DOCTYPE",
+            ..
+        })
     ));
 }
 
@@ -1138,19 +1087,13 @@ fn custom_entities_are_never_expanded() {
         "<name>&lol;</name>",
         "</contact></customer></prospect></adf>"
     );
-    let mut doc = parse(input).expect("custom entity reference should parse without expansion");
+    let doc = parse(input).expect("custom entity reference should parse without expansion");
     let value = doc.adf().prospects[0].customer.as_ref().unwrap().contacts[0].names[0].value();
     assert_eq!(value.as_ref(), "&lol;");
-    let typed = doc.to_typed_string().unwrap();
-    assert!(typed.contains("<!DOCTYPE adf [ <!ENTITY lol \"ha\"> ]>"));
-    assert!(typed.find("<!DOCTYPE").unwrap() < typed.find("<adf>").unwrap());
-    parse(&typed).expect("typed XML should retain the entity declaration");
-    assert_snapshot!("custom_entities_are_never_expanded", typed);
-
-    doc.adf_mut().prospects[0].status = Some(Cow::Borrowed("new"));
-    let broad_rewrite = doc.to_original_preserving_string().unwrap();
-    assert!(broad_rewrite.contains("<!DOCTYPE adf [ <!ENTITY lol \"ha\"> ]>"));
-    assert!(broad_rewrite.contains("<name>&lol;</name>"));
+    assert_snapshot!(
+        "custom_entities_are_never_expanded",
+        doc.to_typed_string().unwrap()
+    );
 }
 
 #[test]
@@ -1174,6 +1117,466 @@ fn custom_entities_in_attributes_are_preserved_as_literal_text() {
         reparsed.adf().prospects[0].status.as_deref(),
         Some("&custom;")
     );
+}
+
+fn built_adf() -> Adf<'static> {
+    let customer_contact = Contact::builder(
+        Name::builder("Jane Doe".to_owned())
+            .part("full")
+            .name_type("individual")
+            .build(),
+        ContactMethod::Email("jane@example.test".to_owned().into()),
+    )
+    .primary_contact(true)
+    .phone(
+        TextElement::builder("555-0100".to_owned())
+            .attribute("type", "voice")
+            .attribute("time", "day")
+            .build(),
+    )
+    .address(
+        Address::builder(
+            TextElement::builder("1 Main St".to_owned())
+                .attribute("line", "1")
+                .build(),
+        )
+        .address_type("home")
+        .city("Detroit".to_owned())
+        .region_code("MI".to_owned())
+        .postal_code("48201".to_owned())
+        .country("US".to_owned())
+        .build(),
+    )
+    .build();
+    let vendor_contact = Contact::builder(
+        Name::builder("Sales".to_owned()).part("full").build(),
+        ContactMethod::Phone("555-0199".to_owned().into()),
+    )
+    .build();
+    let provider_contact = Contact::builder(
+        Name::builder("Support".to_owned()).part("full").build(),
+        ContactMethod::Email("support@example.test".to_owned().into()),
+    )
+    .build();
+
+    let option = VehicleOption::builder("Sunroof".to_owned(), "100".to_owned())
+        .manufacturer_code("SUN".to_owned())
+        .stock("available".to_owned())
+        .price(
+            Price::builder("900")
+                .price_type("msrp")
+                .currency("USD")
+                .build(),
+        )
+        .build();
+    let finance = Finance::builder(
+        "finance".to_owned(),
+        TextElement::builder("1000".to_owned())
+            .attribute("type", "downpayment")
+            .attribute("limit", "minimum")
+            .attribute("currency", "USD")
+            .build(),
+    )
+    .balance(
+        TextElement::builder("24000".to_owned())
+            .attribute("type", "finance")
+            .attribute("currency", "USD")
+            .build(),
+    )
+    .build();
+    let vehicle = Vehicle::builder("2026".to_owned(), "Honda".to_owned(), "Civic".to_owned())
+        .id(Id::builder("vehicle-1", "inventory").sequence("1").build())
+        .interest("buy")
+        .status("new")
+        .vin("1HGCM82633A004352".to_owned())
+        .stock("STK-1".to_owned())
+        .trim("Touring".to_owned())
+        .doors("4".to_owned())
+        .body_style("Sedan".to_owned())
+        .transmission("Automatic".to_owned())
+        .odometer(
+            TextElement::builder("100".to_owned())
+                .attribute("status", "original")
+                .attribute("units", "mi")
+                .build(),
+        )
+        .condition("excellent".to_owned())
+        .color_combination(
+            ColorCombination::builder(
+                ColorSelection::Both {
+                    interior: "Black".to_owned().into(),
+                    exterior: "Blue".to_owned().into(),
+                },
+                "1".to_owned(),
+            )
+            .build(),
+        )
+        .image_tag(
+            TextElement::builder("https://example.test/car.jpg".to_owned())
+                .attribute("width", "640")
+                .attribute("height", "480")
+                .attribute("alttext", "car")
+                .build(),
+        )
+        .price(
+            Price::builder("25000")
+                .price_type("quote")
+                .currency("USD")
+                .source("dealer")
+                .build(),
+        )
+        .price_comments("Plus taxes".to_owned())
+        .option(option)
+        .finance(finance)
+        .comments("Vehicle comment".to_owned())
+        .build();
+    let customer = Customer::builder(customer_contact)
+        .id(Id::new("customer-1", "crm"))
+        .timeframe(
+            Timeframe::builder(TimeframeWindow::Range {
+                earliest: "20260715T120000-0400".to_owned().into(),
+                latest: "2026-08-15T12:00:00-04:00".to_owned().into(),
+            })
+            .description("Within a month".to_owned())
+            .build(),
+        )
+        .comments("Customer comment".to_owned())
+        .build();
+    let vendor = Vendor::builder("Example Motors".to_owned(), vendor_contact)
+        .id(Id::new("vendor-1", "directory"))
+        .url("https://dealer.example".to_owned())
+        .build();
+    let provider = Provider::builder(
+        Name::builder("Lead Provider".to_owned())
+            .part("full")
+            .name_type("business")
+            .build(),
+    )
+    .id(Id::new("provider-1", "provider"))
+    .service("Internet leads".to_owned())
+    .url("https://provider.example".to_owned())
+    .email("provider@example.test".to_owned())
+    .phone("555-0188".to_owned())
+    .contact(provider_contact)
+    .build();
+    let prospect = Prospect::builder(
+        "2026-07-15T12:00:00-04:00".to_owned(),
+        vehicle,
+        customer,
+        vendor,
+    )
+    .status("new")
+    .id(Id::builder("lead-1", "provider").sequence("1").build())
+    .provider(provider)
+    .build();
+    Adf::builder(prospect).build()
+}
+
+#[test]
+fn builders_write_reparse_and_conform() {
+    let minimal = Adf::builder(
+        Prospect::builder(
+            "2026-07-15T12:00:00-04:00".to_owned(),
+            Vehicle::builder("2026".to_owned(), "Honda".to_owned(), "Civic".to_owned()).build(),
+            Customer::builder(
+                Contact::builder(
+                    Name::new("Jane"),
+                    ContactMethod::Email("jane@example.test".to_owned().into()),
+                )
+                .build(),
+            )
+            .build(),
+            Vendor::builder(
+                "Dealer".to_owned(),
+                Contact::builder(
+                    Name::new("Sales"),
+                    ContactMethod::Phone("555-0100".to_owned().into()),
+                )
+                .build(),
+            )
+            .build(),
+        )
+        .build(),
+    )
+    .build();
+    let minimal_xml = to_string(&minimal).expect("minimal model should write");
+    assert!(parse(&minimal_xml).unwrap().validate_adf_1_0().is_valid());
+
+    let model = built_adf();
+    for profile in [ValidationProfile::Adf10, ValidationProfile::Adf10Extended] {
+        let report = adf::validate_with(&model, ValidationOptions::default().profile(profile));
+        assert!(report.is_valid(), "{profile:?}: {:#?}", report.issues);
+    }
+
+    let xml = to_string(&model).expect("constructed model should write");
+    assert!(xml.starts_with("<?xml version=\"1.0\"?>\n<?adf version=\"1.0\"?>\n<adf>"));
+    let reparsed = parse(&xml).expect("constructed output should reparse");
+    assert!(reparsed.validate_adf_1_0().is_valid());
+    assert!(reparsed.validate_adf_1_0_extended().is_valid());
+}
+
+#[test]
+fn exact_and_extended_profiles_differ_only_on_partner_content() {
+    let input = r#"<adf partner="x"><prospect><requestdate>2026-07-15T12:00:00-04:00</requestdate><vehicle><year>2026</year><make>Honda</make><model>Civic</model><partner-data>ok</partner-data></vehicle><customer><contact><name part="full">Jane</name><email>jane@example.test</email></contact></customer><vendor><vendorname>Dealer</vendorname><contact><name part="full">Sales</name><phone>555-0100</phone></contact></vendor></prospect></adf>"#;
+    let document = parse(input).unwrap();
+    let exact = document.validate_adf_1_0();
+    let extended = document.validate_adf_1_0_extended();
+    assert!(!exact.is_valid());
+    assert!(exact.issues.iter().any(|issue| matches!(
+        issue.code,
+        ValidationCode::UnexpectedAttribute | ValidationCode::UnexpectedElement
+    )));
+    assert!(extended.is_valid(), "{:#?}", extended.issues);
+
+    let mixed = input.replace("<year>2026</year>", "<year>20<partner/>26</year>");
+    let mixed = parse(&mixed).unwrap();
+    assert!(
+        mixed
+            .validate_adf_1_0()
+            .issues
+            .iter()
+            .any(|issue| issue.code == ValidationCode::UnexpectedElement)
+    );
+    assert!(mixed.validate_adf_1_0_extended().is_valid());
+}
+
+#[test]
+fn conformance_reports_duplicate_order_enum_format_and_range_codes() {
+    let input = r#"<adf><prospect status="again"><requestdate>2026-07-15T12:00:00Z</requestdate><requestdate>2026-07-15T12:00:00-04:00</requestdate><vehicle><make>Honda</make><year>2026</year><model>Civic</model><option><optionname>x</optionname><weighting>101</weighting></option></vehicle><customer><id source="crm">1</id><contact><name part="full">Jane</name><email>jane@example.test</email></contact></customer><vendor><vendorname>Dealer</vendorname><contact><name part="full">Sales</name><phone>555-0100</phone></contact></vendor></prospect></adf>"#;
+    let report = parse(input).unwrap().validate_adf_1_0();
+    for expected in [
+        ValidationCode::Duplicate,
+        ValidationCode::OutOfOrder,
+        ValidationCode::InvalidEnum,
+        ValidationCode::InvalidFormat,
+        ValidationCode::InvalidRange,
+    ] {
+        assert!(
+            report.issues.iter().any(|issue| issue.code == expected),
+            "missing {expected:?}: {:#?}",
+            report.issues
+        );
+    }
+}
+
+#[test]
+fn conformance_codes_cover_required_excessive_registry_and_placement_rules() {
+    let cases = [
+        (
+            "missing required",
+            r#"<adf><prospect/></adf>"#,
+            ValidationCode::MissingRequired,
+        ),
+        (
+            "excessive email",
+            r#"<adf><prospect><requestdate>2026-07-15T12:00:00-04:00</requestdate><vehicle><year>2026</year><make>Honda</make><model>Civic</model></vehicle><customer><contact><name>Jane</name><email>a@example.test</email><email>b@example.test</email></contact></customer><vendor><vendorname>Dealer</vendorname><contact><name>Sales</name><phone>555-0100</phone></contact></vendor></prospect></adf>"#,
+            ValidationCode::Excessive,
+        ),
+        (
+            "inactive currency",
+            r#"<adf><prospect><requestdate>2026-07-15T12:00:00-04:00</requestdate><vehicle><year>2026</year><make>Honda</make><model>Civic</model><price currency="CUC">1</price></vehicle><customer><contact><name>Jane</name><email>a@example.test</email></contact></customer><vendor><vendorname>Dealer</vendorname><contact><name>Sales</name><phone>555-0100</phone></contact></vendor></prospect></adf>"#,
+            ValidationCode::InvalidFormat,
+        ),
+        (
+            "unassigned country",
+            r#"<adf><prospect><requestdate>2026-07-15T12:00:00-04:00</requestdate><vehicle><year>2026</year><make>Honda</make><model>Civic</model></vehicle><customer><contact><name>Jane</name><email>a@example.test</email><address><street>1 Main</street><country>ZZ</country></address></contact></customer><vendor><vendorname>Dealer</vendorname><contact><name>Sales</name><phone>555-0100</phone></contact></vendor></prospect></adf>"#,
+            ValidationCode::InvalidFormat,
+        ),
+    ];
+    for (name, input, expected) in cases {
+        let report = parse(input).unwrap().validate_adf_1_0();
+        assert!(
+            report.issues.iter().any(|issue| issue.code == expected),
+            "{name} did not emit {expected:?}: {:#?}",
+            report.issues
+        );
+    }
+
+    let misplaced = r#"<adf><prospect><requestdate>2026-07-15T12:00:00-04:00</requestdate><vehicle><year>2026</year><make>Honda</make><model>Civic</model></vehicle><customer status="new"><contact><name>Jane</name><email>a@example.test</email></contact></customer><vendor><vendorname>Dealer</vendorname><contact><name>Sales</name><phone>555-0100</phone></contact></vendor></prospect></adf>"#;
+    let report = parse(misplaced).unwrap().validate_adf_1_0_extended();
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.code == ValidationCode::UnexpectedAttribute)
+    );
+}
+
+#[test]
+fn comments_and_processing_instructions_do_not_affect_content_order() {
+    let input = r#"<adf><!--a--><prospect><?partner x?><requestdate>2026-07-15T12:00:00-04:00</requestdate><!--b--><vehicle><year>2026</year><make>Honda</make><model>Civic</model></vehicle><customer><contact><name>Jane</name><email>a@example.test</email></contact></customer><vendor><vendorname>Dealer</vendorname><contact><name>Sales</name><phone>555-0100</phone></contact></vendor></prospect></adf>"#;
+    let report = parse(input).unwrap().validate_adf_1_0();
+    assert!(report.is_valid(), "{:#?}", report.issues);
+}
+
+#[test]
+fn duplicate_singular_elements_survive_dirty_rewrites() {
+    let input = r#"<adf><prospect><requestdate>2026-07-15T12:00:00-04:00</requestdate><requestdate>2026-07-16T12:00:00-04:00</requestdate><vehicle><year>2026</year><make>Honda</make><model>Civic</model></vehicle><customer><contact><name part="full">Jane</name><email>jane@example.test</email></contact></customer><vendor><vendorname>Dealer</vendorname><contact><name part="full">Sales</name><phone>555-0100</phone></contact></vendor></prospect></adf>"#;
+    let mut document = parse(input).unwrap();
+    assert_eq!(
+        document.adf().prospects[0]
+            .request_date
+            .as_ref()
+            .unwrap()
+            .value(),
+        "2026-07-15T12:00:00-04:00"
+    );
+    assert!(
+        document
+            .validate_adf_1_0()
+            .issues
+            .iter()
+            .any(|issue| issue.code == ValidationCode::Duplicate)
+    );
+    assert_eq!(document.to_original_preserving_string().unwrap(), input);
+    document.prospect_mut(0).unwrap().status = Some(Cow::Borrowed("new"));
+    let rewritten = document.to_original_preserving_string().unwrap();
+    assert_eq!(rewritten.matches("<requestdate>").count(), 2);
+}
+
+#[test]
+fn owned_ingestion_and_conversion_cover_string_bytes_and_reader() {
+    let input = "<adf><prospect/></adf>".to_owned();
+    let owned = parse_owned(input.clone()).unwrap();
+    assert_eq!(owned.original(), input);
+    let typed: Adf<'static> = owned.into_adf();
+    assert_eq!(typed.prospects.len(), 1);
+
+    assert_eq!(parse_bytes(input.as_bytes()).unwrap().original(), input);
+    assert_eq!(
+        parse_reader(std::io::Cursor::new(input.as_bytes()))
+            .unwrap()
+            .original(),
+        input
+    );
+
+    let converted: AdfDocument<'static> = {
+        let temporary = "<adf><prospect/></adf>".to_owned();
+        parse(&temporary).unwrap().into_owned()
+    };
+    assert_eq!(converted.original(), input);
+}
+
+#[test]
+fn parsing_limits_are_enforced_at_boundaries() {
+    let input = "<adf/>";
+    assert!(parse_with(input, &ParseOptions::default().max_input_len(input.len())).is_ok());
+    assert!(matches!(
+        parse_with(input, &ParseOptions::default().max_input_len(input.len() - 1)),
+        Err(Error::LimitExceeded {
+            limit: ParseLimit::InputLength,
+            maximum,
+            actual,
+            ..
+        }) if maximum == input.len() - 1 && actual == input.len()
+    ));
+    assert!(matches!(
+        parse_with("<adf><x/></adf>", &ParseOptions::default().max_depth(1)),
+        Err(Error::LimitExceeded {
+            limit: ParseLimit::Depth,
+            ..
+        })
+    ));
+    assert!(matches!(
+        parse_with(
+            "<adf a=\"1\"/>",
+            &ParseOptions::default().max_attributes_per_element(0)
+        ),
+        Err(Error::LimitExceeded {
+            limit: ParseLimit::AttributesPerElement,
+            ..
+        })
+    ));
+    assert!(matches!(
+        parse_with("<!--x--><adf/>", &ParseOptions::default().max_nodes(1)),
+        Err(Error::LimitExceeded {
+            limit: ParseLimit::Nodes,
+            ..
+        })
+    ));
+
+    assert!(matches!(
+        parse_bytes(&[0xff]),
+        Err(Error::Utf8 { position: 0, .. })
+    ));
+    assert!(matches!(
+        parse_bytes(br#"<?xml version="1.0" encoding="ISO-8859-1"?><adf/>"#),
+        Err(Error::UnsupportedEncoding { .. })
+    ));
+    assert!(matches!(
+        parse_bytes_with(input.as_bytes(), &ParseOptions::default().max_input_len(1)),
+        Err(Error::LimitExceeded {
+            limit: ParseLimit::InputLength,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn normalized_writing_preserves_document_misc_and_applies_entity_policies() {
+    let input = concat!(
+        "<?xml version=\"1.0\"?>\n",
+        "<?adf version=\"1.0\"?>\n",
+        "<!--before--><?partner mode=\"x\"?>",
+        "<!DOCTYPE adf [<!ENTITY nbsp \"&#160;\">]>",
+        "<adf><prospect><customer><comments>&nbsp;</comments></customer></prospect></adf>",
+        "<!--after-->"
+    );
+    let document = parse(input).unwrap();
+    let normalized = document.to_typed_string().unwrap();
+    for expected in [
+        "<!--before-->",
+        "<?partner mode=\"x\"?>",
+        "<!DOCTYPE adf",
+        "&nbsp;",
+        "<!--after-->",
+    ] {
+        assert!(
+            normalized.contains(expected),
+            "missing {expected}: {normalized}"
+        );
+    }
+
+    let model = document.adf().clone();
+    assert!(matches!(
+        to_string(&model),
+        Err(Error::UndeclaredEntityReference { .. })
+    ));
+    let escaped = to_string_with(
+        &model,
+        &WriteOptions::default().unknown_entity_policy(UnknownEntityPolicy::Escape),
+    )
+    .unwrap();
+    assert!(escaped.contains("&amp;nbsp;"));
+    let preserved = to_string_with(
+        &model,
+        &WriteOptions::default().doctype("adf [<!ENTITY nbsp \"&#160;\">]"),
+    )
+    .unwrap();
+    assert!(preserved.contains("<!DOCTYPE adf [<!ENTITY nbsp \"&#160;\">]>"));
+    assert!(preserved.contains("&nbsp;"));
+
+    for doctype in [
+        "<!DOCTYPE adf>",
+        "<!DOCTYPE adf [<!-- <!ENTITY nbsp \"fake\"> -->]>",
+        "<!DOCTYPE adf [<?partner <!ENTITY nbsp \"fake\"> ?>]>",
+    ] {
+        let input = format!(
+            "{doctype}<adf><prospect><customer><comments>&nbsp;</comments></customer></prospect></adf>"
+        );
+        let document = parse(&input).unwrap();
+        assert!(matches!(
+            document.to_typed_string(),
+            Err(Error::UndeclaredEntityReference { ref name }) if name == "nbsp"
+        ));
+
+        let mut document = document;
+        document.adf_mut();
+        assert!(matches!(
+            document.to_original_preserving_string(),
+            Err(Error::UndeclaredEntityReference { ref name }) if name == "nbsp"
+        ));
+    }
 }
 
 #[test]

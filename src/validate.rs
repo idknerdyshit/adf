@@ -1,8 +1,9 @@
 use crate::document::Span;
 use crate::model::{
-    Adf, Contact, Customer, Finance, Price, Prospect, Provider, Timeframe, Vehicle, Vendor,
+    Address, Adf, ColorCombination, Contact, Customer, Finance, Id, Price, Prospect, Provider,
+    Timeframe, Vehicle, VehicleOption, Vendor,
 };
-use crate::{Attribute, TextElement};
+use crate::{Attribute, TextElement, TextPart, XmlNode};
 use std::borrow::Cow;
 
 /// Validation severity.
@@ -14,9 +15,48 @@ pub enum Severity {
     Error,
 }
 
+/// Machine-readable validation finding category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ValidationCode {
+    Advisory,
+    MissingRequired,
+    Duplicate,
+    Excessive,
+    OutOfOrder,
+    UnexpectedElement,
+    UnexpectedAttribute,
+    InvalidEnum,
+    InvalidFormat,
+    InvalidRange,
+}
+
+/// Validation behavior to apply to a typed ADF model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ValidationProfile {
+    #[default]
+    Lenient,
+    Structural,
+    Adf10,
+    Adf10Extended,
+}
+
+impl ValidationProfile {
+    fn is_conformance(self) -> bool {
+        matches!(self, Self::Adf10 | Self::Adf10Extended)
+    }
+
+    fn rejects_extensions(self) -> bool {
+        matches!(self, Self::Adf10)
+    }
+}
+
 /// One validation finding with a model path and optional source span.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationIssue<'a> {
+    /// Machine-readable category for this finding.
+    pub code: ValidationCode,
     /// Whether this issue is a warning or error.
     pub severity: Severity,
     /// Dot-style path into the typed ADF model.
@@ -33,6 +73,7 @@ pub struct ValidationIssue<'a> {
 pub struct ValidationReport<'a> {
     /// Findings emitted during validation.
     pub issues: Vec<ValidationIssue<'a>>,
+    profile: ValidationProfile,
 }
 
 impl ValidationReport<'_> {
@@ -45,15 +86,12 @@ impl ValidationReport<'_> {
     }
 }
 
-/// Options controlling ADF validation strictness.
+/// Options selecting structural or ADF 1.0 conformance validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct ValidationOptions {
-    /// Promote missing DTD-required structure from warnings to errors.
-    ///
-    /// Enumerated-value and lightweight format checks remain warnings in
-    /// strict mode; strictness only controls required structural fields.
-    pub strict: bool,
+    /// Selected validation profile.
+    pub profile: ValidationProfile,
 }
 
 impl ValidationOptions {
@@ -62,7 +100,18 @@ impl ValidationOptions {
     /// This does not promote enum, date, country, or currency shape warnings.
     #[must_use]
     pub fn strict(mut self, strict: bool) -> Self {
-        self.strict = strict;
+        self.profile = if strict {
+            ValidationProfile::Structural
+        } else {
+            ValidationProfile::Lenient
+        };
+        self
+    }
+
+    /// Select an explicit validation profile.
+    #[must_use]
+    pub fn profile(mut self, profile: ValidationProfile) -> Self {
+        self.profile = profile;
         self
     }
 }
@@ -106,8 +155,8 @@ const PRICE_RELATIVE_TO: AllowedValues = AllowedValues {
     display: "msrp, invoice",
 };
 const NAME_PART: AllowedValues = AllowedValues {
-    values: &["surname", "first", "middle", "last", "full"],
-    display: "surname, first, middle, last, full",
+    values: &["first", "middle", "suffix", "last", "full"],
+    display: "first, middle, suffix, last, full",
 };
 const NAME_TYPE: AllowedValues = AllowedValues {
     values: &["business", "individual"],
@@ -166,17 +215,35 @@ pub fn validate<'a>(adf: &Adf<'a>) -> ValidationReport<'a> {
     validate_with(adf, ValidationOptions::default())
 }
 
+/// Validate against the exact ADF 1.0 profile.
+pub fn validate_adf_1_0<'a>(adf: &Adf<'a>) -> ValidationReport<'a> {
+    validate_with(
+        adf,
+        ValidationOptions::default().profile(ValidationProfile::Adf10),
+    )
+}
+
+/// Validate ADF 1.0 while permitting partner extensions.
+pub fn validate_adf_1_0_extended<'a>(adf: &Adf<'a>) -> ValidationReport<'a> {
+    validate_with(
+        adf,
+        ValidationOptions::default().profile(ValidationProfile::Adf10Extended),
+    )
+}
+
 /// Validate a typed ADF model with explicit options.
 ///
-/// Validation is intentionally narrower than full DTD/schema validation. It
-/// checks required high-level ADF structure, common DTD enumerations, and
-/// lightweight date/country/currency shape rules. [`ValidationOptions::strict`]
-/// only changes the severity of missing required structure.
+/// Lenient and structural profiles retain the crate's compatibility-oriented
+/// checks. The two ADF 1.0 profiles enforce the standard's complete content
+/// model, values, formats, ranges, and standard-name placement.
 pub fn validate_with<'a>(adf: &Adf<'a>, options: ValidationOptions) -> ValidationReport<'a> {
-    let span = tracing::debug_span!("adf.validate", strict = options.strict);
+    let span = tracing::debug_span!("adf.validate", profile = ?options.profile);
     let _span_guard = span.enter();
 
-    let mut report = ValidationReport::default();
+    let mut report = ValidationReport {
+        issues: Vec::new(),
+        profile: options.profile,
+    };
 
     report.required(
         options,
@@ -189,6 +256,10 @@ pub fn validate_with<'a>(adf: &Adf<'a>, options: ValidationOptions) -> Validatio
     for (index, prospect) in adf.prospects.iter().enumerate() {
         let path = format!("adf.prospect[{index}]");
         validate_prospect(&mut report, &path, prospect, options);
+    }
+
+    if options.profile.is_conformance() {
+        validate_conformance(&mut report, adf);
     }
 
     if tracing::enabled!(tracing::Level::DEBUG) {
@@ -410,7 +481,8 @@ fn validate_contact(
         "contact is missing name",
     );
     if require_email_or_phone && contact.emails.is_empty() && contact.phones.is_empty() {
-        report.warn(
+        report.rule(
+            ValidationCode::MissingRequired,
             path.to_owned(),
             contact.span,
             "contact should contain email or phone",
@@ -542,7 +614,8 @@ fn validate_vehicle(
         let value = condition.value();
         let trimmed = value.trim();
         if !trimmed.is_empty() && !CONDITION_VALUES.contains(&trimmed) {
-            report.warn(
+            report.rule(
+                ValidationCode::InvalidEnum,
                 format!("{path}.condition"),
                 condition.span,
                 format!("invalid condition value {trimmed:?}"),
@@ -601,7 +674,8 @@ fn validate_finance(report: &mut ValidationReport<'_>, path: &str, finance: &Fin
         let value = method.value();
         let trimmed = value.trim();
         if !trimmed.is_empty() && !FINANCE_METHOD.contains(&trimmed) {
-            report.warn(
+            report.rule(
+                ValidationCode::InvalidEnum,
                 format!("{path}.method"),
                 method.span,
                 format!("invalid finance method {trimmed:?}"),
@@ -642,6 +716,1201 @@ fn validate_amount(
     );
     if let Some(currency) = attr_value(&amount.attributes, "currency") {
         check_iso_currency(report, || format!("{path}@currency"), amount.span, currency);
+    }
+}
+
+fn validate_conformance(report: &mut ValidationReport<'_>, adf: &Adf<'_>) {
+    check_attributes(report, "adf", adf.span, &adf.attributes, &[]);
+    check_extensions(report, "adf", adf.span, &adf.extensions, &["prospect"]);
+    let mut order = Vec::new();
+    for (index, prospect) in adf.prospects.iter().enumerate() {
+        order.push((prospect.span, 0, format!("adf.prospect[{index}]")));
+        conform_prospect(report, &format!("adf.prospect[{index}]"), prospect);
+    }
+    check_order(report, order);
+}
+
+fn conform_prospect(report: &mut ValidationReport<'_>, path: &str, value: &Prospect<'_>) {
+    check_attributes(report, path, value.span, &value.attributes, &["status"]);
+    check_extensions(
+        report,
+        path,
+        value.span,
+        &value.extensions,
+        &[
+            "id",
+            "requestdate",
+            "vehicle",
+            "customer",
+            "vendor",
+            "provider",
+        ],
+    );
+    for (index, id) in value.ids.iter().enumerate() {
+        conform_id(report, &format!("{path}.id[{index}]"), id);
+    }
+    if let Some(date) = &value.request_date {
+        check_attributes(
+            report,
+            &format!("{path}.requestdate"),
+            date.span,
+            &date.attributes,
+            &[],
+        );
+        check_text_parts(report, &format!("{path}.requestdate"), date);
+        check_adf_datetime(
+            report,
+            &format!("{path}.requestdate"),
+            date.span,
+            &date.value(),
+        );
+    }
+    let mut order = Vec::new();
+    for (index, id) in value.ids.iter().enumerate() {
+        order.push((id.span, 0, format!("{path}.id[{index}]")));
+    }
+    push_text_order(
+        &mut order,
+        &value.request_date,
+        1,
+        format!("{path}.requestdate"),
+    );
+    for (index, vehicle) in value.vehicles.iter().enumerate() {
+        order.push((vehicle.span, 2, format!("{path}.vehicle[{index}]")));
+        conform_vehicle(report, &format!("{path}.vehicle[{index}]"), vehicle);
+    }
+    if let Some(customer) = &value.customer {
+        order.push((customer.span, 3, format!("{path}.customer")));
+        conform_customer(report, &format!("{path}.customer"), customer);
+    }
+    if let Some(vendor) = &value.vendor {
+        order.push((vendor.span, 4, format!("{path}.vendor")));
+        conform_vendor(report, &format!("{path}.vendor"), vendor);
+    }
+    if let Some(provider) = &value.provider {
+        order.push((provider.span, 5, format!("{path}.provider")));
+        conform_provider(report, &format!("{path}.provider"), provider);
+    }
+    check_order(report, order);
+}
+
+fn conform_vehicle(report: &mut ValidationReport<'_>, path: &str, value: &Vehicle<'_>) {
+    check_attributes(
+        report,
+        path,
+        value.span,
+        &value.attributes,
+        &["interest", "status"],
+    );
+    check_extensions(
+        report,
+        path,
+        value.span,
+        &value.extensions,
+        &[
+            "id",
+            "year",
+            "make",
+            "model",
+            "vin",
+            "stock",
+            "trim",
+            "doors",
+            "bodystyle",
+            "transmission",
+            "odometer",
+            "condition",
+            "colorcombination",
+            "imagetag",
+            "price",
+            "pricecomments",
+            "option",
+            "finance",
+            "comments",
+        ],
+    );
+    check_max(
+        report,
+        &format!("{path}.imagetag"),
+        value.span,
+        value.image_tags.len(),
+        1,
+    );
+    for (name, field) in [
+        ("year", &value.year),
+        ("make", &value.make),
+        ("model", &value.model),
+        ("vin", &value.vin),
+        ("stock", &value.stock),
+        ("trim", &value.trim),
+        ("doors", &value.doors),
+        ("bodystyle", &value.body_style),
+        ("transmission", &value.transmission),
+        ("condition", &value.condition),
+        ("pricecomments", &value.price_comments),
+        ("comments", &value.comments),
+    ] {
+        check_plain_text(report, &format!("{path}.{name}"), field);
+    }
+    check_max(
+        report,
+        &format!("{path}.price"),
+        value.span,
+        value.prices.len(),
+        1,
+    );
+    for (index, id) in value.ids.iter().enumerate() {
+        conform_id(report, &format!("{path}.id[{index}]"), id);
+    }
+    if let Some(odometer) = &value.odometer {
+        check_attributes(
+            report,
+            &format!("{path}.odometer"),
+            odometer.span,
+            &odometer.attributes,
+            &["status", "units"],
+        );
+        check_text_parts(report, &format!("{path}.odometer"), odometer);
+    }
+    for (index, colors) in value.color_combinations.iter().enumerate() {
+        conform_colors(report, &format!("{path}.colorcombination[{index}]"), colors);
+    }
+    for (index, image) in value.image_tags.iter().enumerate() {
+        check_attributes(
+            report,
+            &format!("{path}.imagetag[{index}]"),
+            image.span,
+            &image.attributes,
+            &["width", "height", "alttext"],
+        );
+        check_text_parts(report, &format!("{path}.imagetag[{index}]"), image);
+    }
+    for (index, price) in value.prices.iter().enumerate() {
+        conform_price(report, &format!("{path}.price[{index}]"), price);
+    }
+    for (index, option) in value.options.iter().enumerate() {
+        conform_option(report, &format!("{path}.option[{index}]"), option);
+    }
+    if let Some(finance) = &value.finance {
+        conform_finance(report, &format!("{path}.finance"), finance);
+    }
+    let mut order = Vec::new();
+    for (index, id) in value.ids.iter().enumerate() {
+        order.push((id.span, 0, format!("{path}.id[{index}]")));
+    }
+    let fields = [
+        (&value.year, 1, "year"),
+        (&value.make, 2, "make"),
+        (&value.model, 3, "model"),
+        (&value.vin, 4, "vin"),
+        (&value.stock, 5, "stock"),
+        (&value.trim, 6, "trim"),
+        (&value.doors, 7, "doors"),
+        (&value.body_style, 8, "bodystyle"),
+        (&value.transmission, 9, "transmission"),
+        (&value.odometer, 10, "odometer"),
+        (&value.condition, 11, "condition"),
+    ];
+    for (field, rank, name) in fields {
+        push_text_order(&mut order, field, rank, format!("{path}.{name}"));
+    }
+    for (index, item) in value.color_combinations.iter().enumerate() {
+        order.push((item.span, 12, format!("{path}.colorcombination[{index}]")));
+    }
+    for (index, item) in value.image_tags.iter().enumerate() {
+        order.push((item.span, 13, format!("{path}.imagetag[{index}]")));
+    }
+    for (index, item) in value.prices.iter().enumerate() {
+        order.push((item.span, 14, format!("{path}.price[{index}]")));
+    }
+    push_text_order(
+        &mut order,
+        &value.price_comments,
+        15,
+        format!("{path}.pricecomments"),
+    );
+    for (index, item) in value.options.iter().enumerate() {
+        order.push((item.span, 16, format!("{path}.option[{index}]")));
+    }
+    if let Some(item) = &value.finance {
+        order.push((item.span, 17, format!("{path}.finance")));
+    }
+    push_text_order(&mut order, &value.comments, 18, format!("{path}.comments"));
+    check_order(report, order);
+}
+
+fn conform_colors(report: &mut ValidationReport<'_>, path: &str, value: &ColorCombination<'_>) {
+    check_attributes(report, path, value.span, &value.attributes, &[]);
+    check_extensions(
+        report,
+        path,
+        value.span,
+        &value.extensions,
+        &["interiorcolor", "exteriorcolor", "preference"],
+    );
+    required_rule(
+        report,
+        path,
+        value.span,
+        value.interior_color.is_some() || value.exterior_color.is_some(),
+        "colorcombination requires an interiorcolor or exteriorcolor",
+    );
+    required_rule(
+        report,
+        path,
+        value.span,
+        value.preference.is_some(),
+        "colorcombination requires preference",
+    );
+    if let Some(preference) = &value.preference {
+        check_positive_integer(
+            report,
+            &format!("{path}.preference"),
+            preference.span,
+            &preference.value(),
+        );
+    }
+    let mut order = Vec::new();
+    for (field, rank, name) in [
+        (&value.interior_color, 0, "interiorcolor"),
+        (&value.exterior_color, 1, "exteriorcolor"),
+        (&value.preference, 2, "preference"),
+    ] {
+        check_plain_text(report, &format!("{path}.{name}"), field);
+        push_text_order(&mut order, field, rank, format!("{path}.{name}"));
+    }
+    check_order(report, order);
+}
+
+fn conform_option(report: &mut ValidationReport<'_>, path: &str, value: &VehicleOption<'_>) {
+    check_attributes(report, path, value.span, &value.attributes, &[]);
+    check_extensions(
+        report,
+        path,
+        value.span,
+        &value.extensions,
+        &[
+            "optionname",
+            "manufacturercode",
+            "stock",
+            "weighting",
+            "price",
+        ],
+    );
+    required_rule(
+        report,
+        path,
+        value.span,
+        value.option_name.is_some(),
+        "option requires optionname",
+    );
+    required_rule(
+        report,
+        path,
+        value.span,
+        value.weighting.is_some(),
+        "option requires weighting",
+    );
+    check_max(
+        report,
+        &format!("{path}.price"),
+        value.span,
+        value.prices.len(),
+        1,
+    );
+    if let Some(weighting) = &value.weighting {
+        check_integer_range(
+            report,
+            &format!("{path}.weighting"),
+            weighting.span,
+            &weighting.value(),
+            -100,
+            100,
+        );
+    }
+    for (index, price) in value.prices.iter().enumerate() {
+        conform_price(report, &format!("{path}.price[{index}]"), price);
+    }
+    let mut order = Vec::new();
+    for (field, rank, name) in [
+        (&value.option_name, 0, "optionname"),
+        (&value.manufacturer_code, 1, "manufacturercode"),
+        (&value.stock, 2, "stock"),
+        (&value.weighting, 3, "weighting"),
+    ] {
+        check_plain_text(report, &format!("{path}.{name}"), field);
+        push_text_order(&mut order, field, rank, format!("{path}.{name}"));
+    }
+    for (index, price) in value.prices.iter().enumerate() {
+        order.push((price.span, 4, format!("{path}.price[{index}]")));
+    }
+    check_order(report, order);
+}
+
+fn conform_finance(report: &mut ValidationReport<'_>, path: &str, value: &Finance<'_>) {
+    check_attributes(report, path, value.span, &value.attributes, &[]);
+    check_extensions(
+        report,
+        path,
+        value.span,
+        &value.extensions,
+        &["method", "amount", "balance"],
+    );
+    required_rule(
+        report,
+        path,
+        value.span,
+        value.method.is_some(),
+        "finance requires method",
+    );
+    required_rule(
+        report,
+        path,
+        value.span,
+        !value.amounts.is_empty(),
+        "finance requires at least one amount",
+    );
+    check_max(
+        report,
+        &format!("{path}.balance"),
+        value.span,
+        value.balances.len(),
+        1,
+    );
+    check_plain_text(report, &format!("{path}.method"), &value.method);
+    for (index, amount) in value.amounts.iter().enumerate() {
+        check_attributes(
+            report,
+            &format!("{path}.amount[{index}]"),
+            amount.span,
+            &amount.attributes,
+            &["type", "limit", "currency"],
+        );
+        check_text_parts(report, &format!("{path}.amount[{index}]"), amount);
+        check_enum(
+            report,
+            || format!("{path}.amount[{index}]@type"),
+            amount.span,
+            attr_value(&amount.attributes, "type"),
+            AllowedValues {
+                values: &["downpayment", "monthly", "total"],
+                display: "downpayment, monthly, total",
+            },
+        );
+        if let Some(currency) = attr_value(&amount.attributes, "currency") {
+            check_iso_currency_membership(
+                report,
+                &format!("{path}.amount[{index}]@currency"),
+                amount.span,
+                currency,
+            );
+        }
+    }
+    for (index, balance) in value.balances.iter().enumerate() {
+        check_attributes(
+            report,
+            &format!("{path}.balance[{index}]"),
+            balance.span,
+            &balance.attributes,
+            &["type", "currency"],
+        );
+        check_text_parts(report, &format!("{path}.balance[{index}]"), balance);
+        check_enum(
+            report,
+            || format!("{path}.balance[{index}]@type"),
+            balance.span,
+            attr_value(&balance.attributes, "type"),
+            AllowedValues {
+                values: &["finance", "residual"],
+                display: "finance, residual",
+            },
+        );
+        if let Some(currency) = attr_value(&balance.attributes, "currency") {
+            check_iso_currency_membership(
+                report,
+                &format!("{path}.balance[{index}]@currency"),
+                balance.span,
+                currency,
+            );
+        }
+    }
+    let mut order = Vec::new();
+    push_text_order(&mut order, &value.method, 0, format!("{path}.method"));
+    for (index, amount) in value.amounts.iter().enumerate() {
+        order.push((amount.span, 1, format!("{path}.amount[{index}]")));
+    }
+    for (index, balance) in value.balances.iter().enumerate() {
+        order.push((balance.span, 2, format!("{path}.balance[{index}]")));
+    }
+    check_order(report, order);
+}
+
+fn conform_customer(report: &mut ValidationReport<'_>, path: &str, value: &Customer<'_>) {
+    check_attributes(report, path, value.span, &value.attributes, &[]);
+    check_extensions(
+        report,
+        path,
+        value.span,
+        &value.extensions,
+        &["contact", "id", "timeframe", "comments"],
+    );
+    check_exact(
+        report,
+        &format!("{path}.contact"),
+        value.span,
+        value.contacts.len(),
+        1,
+    );
+    for (index, contact) in value.contacts.iter().enumerate() {
+        conform_contact(report, &format!("{path}.contact[{index}]"), contact);
+    }
+    for (index, id) in value.ids.iter().enumerate() {
+        conform_id(report, &format!("{path}.id[{index}]"), id);
+    }
+    if let Some(timeframe) = &value.timeframe {
+        check_attributes(
+            report,
+            &format!("{path}.timeframe"),
+            timeframe.span,
+            &timeframe.attributes,
+            &[],
+        );
+        check_extensions(
+            report,
+            &format!("{path}.timeframe"),
+            timeframe.span,
+            &timeframe.extensions,
+            &["description", "earliestdate", "latestdate"],
+        );
+        required_rule(
+            report,
+            &format!("{path}.timeframe"),
+            timeframe.span,
+            timeframe.earliest_date.is_some() || timeframe.latest_date.is_some(),
+            "timeframe requires earliestdate or latestdate",
+        );
+        if let Some(date) = &timeframe.earliest_date {
+            check_adf_datetime(
+                report,
+                &format!("{path}.timeframe.earliestdate"),
+                date.span,
+                &date.value(),
+            );
+        }
+        if let Some(date) = &timeframe.latest_date {
+            check_adf_datetime(
+                report,
+                &format!("{path}.timeframe.latestdate"),
+                date.span,
+                &date.value(),
+            );
+        }
+        let mut timeframe_order = Vec::new();
+        for (field, rank, name) in [
+            (&timeframe.description, 0, "description"),
+            (&timeframe.earliest_date, 1, "earliestdate"),
+            (&timeframe.latest_date, 2, "latestdate"),
+        ] {
+            check_plain_text(report, &format!("{path}.timeframe.{name}"), field);
+            push_text_order(
+                &mut timeframe_order,
+                field,
+                rank,
+                format!("{path}.timeframe.{name}"),
+            );
+        }
+        check_order(report, timeframe_order);
+    }
+    check_plain_text(report, &format!("{path}.comments"), &value.comments);
+    let mut order = Vec::new();
+    for (index, contact) in value.contacts.iter().enumerate() {
+        order.push((contact.span, 0, format!("{path}.contact[{index}]")));
+    }
+    for (index, id) in value.ids.iter().enumerate() {
+        order.push((id.span, 1, format!("{path}.id[{index}]")));
+    }
+    if let Some(item) = &value.timeframe {
+        order.push((item.span, 2, format!("{path}.timeframe")));
+    }
+    push_text_order(&mut order, &value.comments, 3, format!("{path}.comments"));
+    check_order(report, order);
+}
+
+fn conform_vendor(report: &mut ValidationReport<'_>, path: &str, value: &Vendor<'_>) {
+    check_attributes(report, path, value.span, &value.attributes, &[]);
+    check_extensions(
+        report,
+        path,
+        value.span,
+        &value.extensions,
+        &["id", "vendorname", "url", "contact"],
+    );
+    check_exact(
+        report,
+        &format!("{path}.contact"),
+        value.span,
+        value.contacts.len(),
+        1,
+    );
+    for (index, id) in value.ids.iter().enumerate() {
+        conform_id(report, &format!("{path}.id[{index}]"), id);
+    }
+    for (index, contact) in value.contacts.iter().enumerate() {
+        conform_contact(report, &format!("{path}.contact[{index}]"), contact);
+    }
+    check_plain_text(report, &format!("{path}.vendorname"), &value.vendor_name);
+    check_plain_text(report, &format!("{path}.url"), &value.url);
+    let mut order = Vec::new();
+    for (index, id) in value.ids.iter().enumerate() {
+        order.push((id.span, 0, format!("{path}.id[{index}]")));
+    }
+    push_text_order(
+        &mut order,
+        &value.vendor_name,
+        1,
+        format!("{path}.vendorname"),
+    );
+    push_text_order(&mut order, &value.url, 2, format!("{path}.url"));
+    for (index, item) in value.contacts.iter().enumerate() {
+        order.push((item.span, 3, format!("{path}.contact[{index}]")));
+    }
+    check_order(report, order);
+}
+
+fn conform_provider(report: &mut ValidationReport<'_>, path: &str, value: &Provider<'_>) {
+    check_attributes(report, path, value.span, &value.attributes, &[]);
+    check_extensions(
+        report,
+        path,
+        value.span,
+        &value.extensions,
+        &["id", "name", "service", "url", "email", "phone", "contact"],
+    );
+    required_rule(
+        report,
+        path,
+        value.span,
+        value.name.is_some(),
+        "provider requires name",
+    );
+    check_max(
+        report,
+        &format!("{path}.contact"),
+        value.span,
+        value.contacts.len(),
+        1,
+    );
+    for (index, id) in value.ids.iter().enumerate() {
+        conform_id(report, &format!("{path}.id[{index}]"), id);
+    }
+    if let Some(name) = &value.name {
+        check_attributes(
+            report,
+            &format!("{path}.name"),
+            name.span,
+            &name.attributes,
+            &["part", "type"],
+        );
+        check_text_parts_raw(report, &format!("{path}.name"), name.span, &name.parts);
+    }
+    if let Some(email) = &value.email {
+        check_attributes(
+            report,
+            &format!("{path}.email"),
+            email.span,
+            &email.attributes,
+            &["preferredcontact"],
+        );
+        check_text_parts(report, &format!("{path}.email"), email);
+    }
+    if let Some(phone) = &value.phone {
+        check_attributes(
+            report,
+            &format!("{path}.phone"),
+            phone.span,
+            &phone.attributes,
+            &["type", "time", "preferredcontact"],
+        );
+        check_text_parts(report, &format!("{path}.phone"), phone);
+    }
+    for (index, contact) in value.contacts.iter().enumerate() {
+        conform_contact(report, &format!("{path}.contact[{index}]"), contact);
+    }
+    for (name, field) in [("service", &value.service), ("url", &value.url)] {
+        check_plain_text(report, &format!("{path}.{name}"), field);
+    }
+    let mut order = Vec::new();
+    for (index, id) in value.ids.iter().enumerate() {
+        order.push((id.span, 0, format!("{path}.id[{index}]")));
+    }
+    if let Some(name) = &value.name {
+        order.push((name.span, 1, format!("{path}.name")));
+    }
+    push_text_order(&mut order, &value.service, 2, format!("{path}.service"));
+    push_text_order(&mut order, &value.url, 3, format!("{path}.url"));
+    push_text_order(&mut order, &value.email, 4, format!("{path}.email"));
+    push_text_order(&mut order, &value.phone, 5, format!("{path}.phone"));
+    for (index, contact) in value.contacts.iter().enumerate() {
+        order.push((contact.span, 6, format!("{path}.contact[{index}]")));
+    }
+    check_order(report, order);
+}
+
+fn conform_contact(report: &mut ValidationReport<'_>, path: &str, value: &Contact<'_>) {
+    check_attributes(
+        report,
+        path,
+        value.span,
+        &value.attributes,
+        &["primarycontact"],
+    );
+    check_extensions(
+        report,
+        path,
+        value.span,
+        &value.extensions,
+        &["name", "email", "phone", "address"],
+    );
+    required_rule(
+        report,
+        path,
+        value.span,
+        !value.names.is_empty(),
+        "contact requires at least one name",
+    );
+    required_rule(
+        report,
+        path,
+        value.span,
+        !value.emails.is_empty() || !value.phones.is_empty(),
+        "contact requires email or phone",
+    );
+    check_max(
+        report,
+        &format!("{path}.address"),
+        value.span,
+        value.addresses.len(),
+        1,
+    );
+    check_max(
+        report,
+        &format!("{path}.email"),
+        value.span,
+        value.emails.len(),
+        1,
+    );
+    for (index, name) in value.names.iter().enumerate() {
+        check_attributes(
+            report,
+            &format!("{path}.name[{index}]"),
+            name.span,
+            &name.attributes,
+            &["part", "type"],
+        );
+        check_text_parts_raw(
+            report,
+            &format!("{path}.name[{index}]"),
+            name.span,
+            &name.parts,
+        );
+    }
+    for (index, email) in value.emails.iter().enumerate() {
+        check_attributes(
+            report,
+            &format!("{path}.email[{index}]"),
+            email.span,
+            &email.attributes,
+            &["preferredcontact"],
+        );
+        check_text_parts(report, &format!("{path}.email[{index}]"), email);
+    }
+    for (index, phone) in value.phones.iter().enumerate() {
+        check_attributes(
+            report,
+            &format!("{path}.phone[{index}]"),
+            phone.span,
+            &phone.attributes,
+            &["type", "time", "preferredcontact"],
+        );
+        check_text_parts(report, &format!("{path}.phone[{index}]"), phone);
+    }
+    for (index, address) in value.addresses.iter().enumerate() {
+        conform_address(report, &format!("{path}.address[{index}]"), address);
+    }
+    let mut order = Vec::new();
+    for (index, item) in value.names.iter().enumerate() {
+        order.push((item.span, 0, format!("{path}.name[{index}]")));
+    }
+    for (index, item) in value.emails.iter().enumerate() {
+        order.push((item.span, 1, format!("{path}.email[{index}]")));
+    }
+    for (index, item) in value.phones.iter().enumerate() {
+        order.push((item.span, 2, format!("{path}.phone[{index}]")));
+    }
+    for (index, item) in value.addresses.iter().enumerate() {
+        order.push((item.span, 3, format!("{path}.address[{index}]")));
+    }
+    check_order(report, order);
+}
+
+fn conform_address(report: &mut ValidationReport<'_>, path: &str, value: &Address<'_>) {
+    check_attributes(report, path, value.span, &value.attributes, &["type"]);
+    check_extensions(
+        report,
+        path,
+        value.span,
+        &value.extensions,
+        &[
+            "street",
+            "apartment",
+            "city",
+            "regioncode",
+            "postalcode",
+            "country",
+        ],
+    );
+    required_rule(
+        report,
+        path,
+        value.span,
+        !value.streets.is_empty(),
+        "address requires at least one street",
+    );
+    check_max(
+        report,
+        &format!("{path}.street"),
+        value.span,
+        value.streets.len(),
+        5,
+    );
+    for (index, street) in value.streets.iter().enumerate() {
+        check_attributes(
+            report,
+            &format!("{path}.street[{index}]"),
+            street.span,
+            &street.attributes,
+            &["line"],
+        );
+        check_text_parts(report, &format!("{path}.street[{index}]"), street);
+        if let Some(line) = attr_value(&street.attributes, "line") {
+            check_integer_range(
+                report,
+                &format!("{path}.street[{index}]@line"),
+                street.span,
+                line,
+                1,
+                5,
+            );
+        }
+    }
+    if let Some(country) = &value.country {
+        check_iso_country_membership(
+            report,
+            &format!("{path}.country"),
+            country.span,
+            &country.value(),
+        );
+    }
+    for (name, field) in [
+        ("apartment", &value.apartment),
+        ("city", &value.city),
+        ("regioncode", &value.region_code),
+        ("postalcode", &value.postal_code),
+        ("country", &value.country),
+    ] {
+        check_plain_text(report, &format!("{path}.{name}"), field);
+    }
+    let mut order = Vec::new();
+    for (index, street) in value.streets.iter().enumerate() {
+        order.push((street.span, 0, format!("{path}.street[{index}]")));
+    }
+    for (field, rank, name) in [
+        (&value.apartment, 1, "apartment"),
+        (&value.city, 2, "city"),
+        (&value.region_code, 3, "regioncode"),
+        (&value.postal_code, 4, "postalcode"),
+        (&value.country, 5, "country"),
+    ] {
+        push_text_order(&mut order, field, rank, format!("{path}.{name}"));
+    }
+    check_order(report, order);
+}
+
+fn conform_id(report: &mut ValidationReport<'_>, path: &str, value: &Id<'_>) {
+    check_attributes(
+        report,
+        path,
+        value.span,
+        &value.attributes,
+        &["sequence", "source"],
+    );
+    check_text_parts_raw(report, path, value.span, &value.parts);
+    required_rule(
+        report,
+        path,
+        value.span,
+        value.source.is_some(),
+        "id requires source",
+    );
+    if let Some(sequence) = value.sequence.as_deref() {
+        check_positive_integer(report, &format!("{path}@sequence"), value.span, sequence);
+    }
+}
+
+fn conform_price(report: &mut ValidationReport<'_>, path: &str, value: &Price<'_>) {
+    check_attributes(
+        report,
+        path,
+        value.span,
+        &value.attributes,
+        &["type", "currency", "delta", "relativeto", "source"],
+    );
+    check_text_parts_raw(report, path, value.span, &value.parts);
+    if let Some(currency) = value.currency.as_deref() {
+        check_iso_currency_membership(report, &format!("{path}@currency"), value.span, currency);
+    }
+}
+
+fn required_rule(
+    report: &mut ValidationReport<'_>,
+    path: &str,
+    span: Span,
+    present: bool,
+    message: &'static str,
+) {
+    if !present {
+        report.error(
+            ValidationCode::MissingRequired,
+            path.to_owned(),
+            span,
+            message,
+        );
+    }
+}
+
+fn check_exact(
+    report: &mut ValidationReport<'_>,
+    path: &str,
+    span: Span,
+    actual: usize,
+    expected: usize,
+) {
+    if actual < expected {
+        report.error(
+            ValidationCode::MissingRequired,
+            path.to_owned(),
+            span,
+            format!("expected {expected}, found {actual}"),
+        );
+    }
+    if actual > expected {
+        report.error(
+            ValidationCode::Excessive,
+            path.to_owned(),
+            span,
+            format!("expected {expected}, found {actual}"),
+        );
+    }
+}
+
+fn check_max(
+    report: &mut ValidationReport<'_>,
+    path: &str,
+    span: Span,
+    actual: usize,
+    maximum: usize,
+) {
+    if actual > maximum {
+        report.error(
+            ValidationCode::Excessive,
+            path.to_owned(),
+            span,
+            format!("expected at most {maximum}, found {actual}"),
+        );
+    }
+}
+
+fn check_attributes(
+    report: &mut ValidationReport<'_>,
+    path: &str,
+    span: Span,
+    attributes: &[Attribute<'_>],
+    allowed: &[&str],
+) {
+    let mut seen = std::collections::HashSet::new();
+    for attribute in attributes {
+        if !seen.insert(attribute.name.as_ref()) {
+            report.error(
+                ValidationCode::Duplicate,
+                format!("{path}@{}", attribute.name),
+                span,
+                "duplicate attribute",
+            );
+        }
+        if !allowed.contains(&attribute.name.as_ref())
+            && (report.profile.rejects_extensions()
+                || STANDARD_ATTRIBUTES.contains(&attribute.name.as_ref()))
+        {
+            report.error(
+                ValidationCode::UnexpectedAttribute,
+                format!("{path}@{}", attribute.name),
+                span,
+                "attribute is not defined by ADF 1.0",
+            );
+        }
+    }
+}
+
+fn check_plain_text(
+    report: &mut ValidationReport<'_>,
+    path: &str,
+    value: &Option<TextElement<'_>>,
+) {
+    if let Some(value) = value {
+        check_attributes(report, path, value.span, &value.attributes, &[]);
+        check_text_parts(report, path, value);
+    }
+}
+
+fn check_text_parts(report: &mut ValidationReport<'_>, path: &str, value: &TextElement<'_>) {
+    check_text_parts_raw(report, path, value.span, &value.parts);
+}
+
+fn check_text_parts_raw(
+    report: &mut ValidationReport<'_>,
+    path: &str,
+    span: Span,
+    parts: &[TextPart<'_>],
+) {
+    for part in parts {
+        if let TextPart::Node(node) = part {
+            check_extensions(report, path, span, std::slice::from_ref(node), &[]);
+        }
+    }
+}
+
+fn check_extensions(
+    report: &mut ValidationReport<'_>,
+    path: &str,
+    span: Span,
+    extensions: &[XmlNode<'_>],
+    known: &[&str],
+) {
+    for extension in extensions {
+        match extension {
+            XmlNode::Element(element) if known.contains(&element.name.as_ref()) => report.error(
+                ValidationCode::Duplicate,
+                format!("{path}.{}", element.name),
+                element.span,
+                "duplicate singular ADF element",
+            ),
+            XmlNode::Element(element)
+                if report.profile.rejects_extensions()
+                    || STANDARD_ELEMENTS.contains(&element.name.as_ref()) =>
+            {
+                report.error(
+                    ValidationCode::UnexpectedElement,
+                    format!("{path}.{}", element.name),
+                    element.span,
+                    "element is not defined at this ADF 1.0 location",
+                )
+            }
+            XmlNode::Text(text) | XmlNode::CData(text)
+                if report.profile.rejects_extensions() && !text.trim().is_empty() =>
+            {
+                report.error(
+                    ValidationCode::UnexpectedElement,
+                    path.to_owned(),
+                    span,
+                    "non-whitespace text is not allowed in this container",
+                )
+            }
+            XmlNode::EntityRef(_) if report.profile.rejects_extensions() => report.error(
+                ValidationCode::UnexpectedElement,
+                path.to_owned(),
+                span,
+                "entity text is not allowed in this container",
+            ),
+            _ => {}
+        }
+    }
+}
+
+const STANDARD_ATTRIBUTES: &[&str] = &[
+    "status",
+    "interest",
+    "units",
+    "width",
+    "height",
+    "alttext",
+    "type",
+    "limit",
+    "currency",
+    "primarycontact",
+    "part",
+    "preferredcontact",
+    "time",
+    "line",
+    "sequence",
+    "source",
+    "delta",
+    "relativeto",
+];
+
+const STANDARD_ELEMENTS: &[&str] = &[
+    "adf",
+    "prospect",
+    "requestdate",
+    "vehicle",
+    "year",
+    "make",
+    "model",
+    "vin",
+    "stock",
+    "trim",
+    "doors",
+    "bodystyle",
+    "transmission",
+    "odometer",
+    "condition",
+    "colorcombination",
+    "interiorcolor",
+    "exteriorcolor",
+    "preference",
+    "imagetag",
+    "price",
+    "pricecomments",
+    "option",
+    "optionname",
+    "manufacturercode",
+    "weighting",
+    "finance",
+    "method",
+    "amount",
+    "balance",
+    "customer",
+    "timeframe",
+    "description",
+    "earliestdate",
+    "latestdate",
+    "vendor",
+    "vendorname",
+    "provider",
+    "service",
+    "contact",
+    "name",
+    "email",
+    "phone",
+    "address",
+    "street",
+    "apartment",
+    "city",
+    "regioncode",
+    "postalcode",
+    "country",
+    "comments",
+    "url",
+    "id",
+];
+
+fn push_text_order(
+    order: &mut Vec<(Span, usize, String)>,
+    value: &Option<TextElement<'_>>,
+    rank: usize,
+    path: String,
+) {
+    if let Some(value) = value {
+        order.push((value.span, rank, path));
+    }
+}
+
+fn check_order(report: &mut ValidationReport<'_>, mut values: Vec<(Span, usize, String)>) {
+    values.retain(|(span, _, _)| *span != Span::default());
+    values.sort_by_key(|(span, _, _)| span.start);
+    let mut highest = 0;
+    for (span, rank, path) in values {
+        if rank < highest {
+            report.error(
+                ValidationCode::OutOfOrder,
+                path,
+                span,
+                "ADF element is out of specification order",
+            );
+        }
+        highest = highest.max(rank);
+    }
+}
+
+fn check_positive_integer(report: &mut ValidationReport<'_>, path: &str, span: Span, value: &str) {
+    match value.trim().parse::<u64>() {
+        Ok(number) if number > 0 => {}
+        _ => report.error(
+            ValidationCode::InvalidRange,
+            path.to_owned(),
+            span,
+            "value must be a positive integer",
+        ),
+    }
+}
+
+fn check_integer_range(
+    report: &mut ValidationReport<'_>,
+    path: &str,
+    span: Span,
+    value: &str,
+    minimum: i64,
+    maximum: i64,
+) {
+    match value.trim().parse::<i64>() {
+        Ok(number) if (minimum..=maximum).contains(&number) => {}
+        _ => report.error(
+            ValidationCode::InvalidRange,
+            path.to_owned(),
+            span,
+            format!("value must be an integer from {minimum} through {maximum}"),
+        ),
+    }
+}
+
+// Snapshots of actively assigned codes checked on 2026-07-15. Keeping the
+// registries as data files makes updates reviewable independently of logic.
+const ISO_COUNTRIES: &str = include_str!("data/iso_3166_1_alpha2_2026-07-15.txt");
+const ISO_CURRENCIES: &str = include_str!("data/iso_4217_2026-07-15.txt");
+
+fn code_in_registry(registry: &str, value: &str) -> bool {
+    registry.split_ascii_whitespace().any(|code| code == value)
+}
+
+fn check_iso_country_membership(
+    report: &mut ValidationReport<'_>,
+    path: &str,
+    span: Span,
+    value: &str,
+) {
+    let value = value.trim();
+    if !code_in_registry(ISO_COUNTRIES, value) {
+        report.error(
+            ValidationCode::InvalidFormat,
+            path.to_owned(),
+            span,
+            format!("{value:?} is not an active ISO 3166-1 alpha-2 code"),
+        );
+    }
+}
+
+fn check_iso_currency_membership(
+    report: &mut ValidationReport<'_>,
+    path: &str,
+    span: Span,
+    value: &str,
+) {
+    if !code_in_registry(ISO_CURRENCIES, value) {
+        report.error(
+            ValidationCode::InvalidFormat,
+            path.to_owned(),
+            span,
+            format!("{value:?} is not an active ISO 4217 code"),
+        );
     }
 }
 
@@ -692,7 +1961,8 @@ fn check_enum(
     if allowed.values.contains(&value) {
         return;
     }
-    report.warn(
+    report.rule(
+        ValidationCode::InvalidEnum,
         path(),
         span,
         format!("value {value:?} is not one of: {}", allowed.display),
@@ -708,7 +1978,8 @@ fn check_iso_currency(
     if value.len() == 3 && value.chars().all(|ch| ch.is_ascii_uppercase()) {
         return;
     }
-    report.warn(
+    report.rule(
+        ValidationCode::InvalidFormat,
         path(),
         span,
         format!("currency {value:?} is not shaped like a 3-letter ISO 4217 code"),
@@ -728,7 +1999,8 @@ fn check_iso_country(
     if trimmed.len() == 2 && trimmed.chars().all(|ch| ch.is_ascii_uppercase()) {
         return;
     }
-    report.warn(
+    report.rule(
+        ValidationCode::InvalidFormat,
         path(),
         span,
         format!("country {trimmed:?} is not shaped like a 2-letter ISO 3166-1 alpha-2 code"),
@@ -748,11 +2020,34 @@ fn check_iso_datetime(
     if is_iso_datetime(trimmed) {
         return;
     }
-    report.warn(
+    report.rule(
+        ValidationCode::InvalidFormat,
         path(),
         span,
         format!("date {trimmed:?} is not in the supported ISO 8601 datetime shape"),
     );
+}
+
+fn check_adf_datetime(report: &mut ValidationReport<'_>, path: &str, span: Span, value: &str) {
+    let value = value.trim();
+    let bytes = value.as_bytes();
+    let exact_shape = match bytes.len() {
+        20 => bytes
+            .get(15)
+            .is_some_and(|byte| matches!(byte, b'+' | b'-')),
+        25 => bytes
+            .get(19)
+            .is_some_and(|byte| matches!(byte, b'+' | b'-')),
+        _ => false,
+    };
+    if !exact_shape || !is_iso_datetime(value) {
+        report.error(
+            ValidationCode::InvalidFormat,
+            path.to_owned(),
+            span,
+            "date must use one of the four ADF 1.0 ISO 8601 forms with an offset",
+        );
+    }
 }
 
 fn is_iso_datetime(value: &str) -> bool {
@@ -887,7 +2182,7 @@ fn days_in_month(year: u32, month: u32) -> u32 {
 }
 
 fn is_leap_year(year: u32) -> bool {
-    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
 }
 
 fn valid_offset(hour: u32, minute: u32) -> bool {
@@ -895,27 +2190,15 @@ fn valid_offset(hour: u32, minute: u32) -> bool {
 }
 
 impl<'a> ValidationReport<'a> {
-    fn warn(
-        &mut self,
-        path: impl Into<Cow<'a, str>>,
-        span: Span,
-        message: impl Into<Cow<'a, str>>,
-    ) {
-        self.issues.push(ValidationIssue {
-            severity: Severity::Warning,
-            path: path.into(),
-            message: message.into(),
-            span: span_option(span),
-        });
-    }
-
     fn error(
         &mut self,
+        code: ValidationCode,
         path: impl Into<Cow<'a, str>>,
         span: Span,
         message: impl Into<Cow<'a, str>>,
     ) {
         self.issues.push(ValidationIssue {
+            code,
             severity: Severity::Error,
             path: path.into(),
             message: message.into(),
@@ -934,10 +2217,41 @@ impl<'a> ValidationReport<'a> {
         if present {
             return;
         }
-        if options.strict {
-            self.error(path.to_owned(), span, message);
+        if !matches!(options.profile, ValidationProfile::Lenient) {
+            self.error(
+                ValidationCode::MissingRequired,
+                path.to_owned(),
+                span,
+                message,
+            );
         } else {
-            self.warn(path.to_owned(), span, message);
+            self.issues.push(ValidationIssue {
+                code: ValidationCode::MissingRequired,
+                severity: Severity::Warning,
+                path: Cow::Owned(path.to_owned()),
+                message: Cow::Borrowed(message),
+                span: span_option(span),
+            });
+        }
+    }
+
+    fn rule(
+        &mut self,
+        code: ValidationCode,
+        path: impl Into<Cow<'a, str>>,
+        span: Span,
+        message: impl Into<Cow<'a, str>>,
+    ) {
+        if self.profile.is_conformance() {
+            self.error(code, path, span, message);
+        } else {
+            self.issues.push(ValidationIssue {
+                code,
+                severity: Severity::Warning,
+                path: path.into(),
+                message: message.into(),
+                span: span_option(span),
+            });
         }
     }
 }

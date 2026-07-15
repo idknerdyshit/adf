@@ -1,0 +1,1 @@
+<!DOCTYPE adf [<!ENTITY x "payload">]><adf><prospect><customer><comments>&x;</comments></customer></prospect></adf>

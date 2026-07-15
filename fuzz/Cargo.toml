@@ -1,0 +1,40 @@
+[package]
+name = "adf-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+adf = { path = ".." }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "owned"
+path = "fuzz_targets/owned.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raw_write"
+path = "fuzz_targets/raw_write.rs"
+test = false
+doc = false
+bench = false

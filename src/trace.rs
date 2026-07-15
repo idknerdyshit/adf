@@ -112,6 +112,7 @@ pub(crate) fn error_kind(error: &Error) -> &'static str {
         Error::Xml { .. } => "xml",
         Error::Attribute { .. } => "attribute",
         Error::Encoding { .. } => "encoding",
+        Error::UnsupportedEncoding { .. } => "unsupported_encoding",
         Error::Utf8 { .. } => "utf8",
         Error::MismatchedEnd { .. } => "mismatched_end",
         Error::UnexpectedEnd { .. } => "unexpected_end",
@@ -119,11 +120,13 @@ pub(crate) fn error_kind(error: &Error) -> &'static str {
         Error::UnexpectedRoot { .. } => "unexpected_root",
         Error::InvalidCharacterReference { .. } => "invalid_character_reference",
         Error::InvalidEntityReference { .. } => "invalid_entity_reference",
+        Error::UndeclaredEntityReference { .. } => "undeclared_entity_reference",
         Error::IllegalCharacter { .. } => "illegal_character",
         Error::InvalidName { .. } => "invalid_name",
         Error::InvalidXmlToken { .. } => "invalid_xml_token",
         Error::DocTypeForbidden { .. } => "doctype_forbidden",
         Error::DocTypeTooLong { .. } => "doctype_too_long",
+        Error::LimitExceeded { .. } => "limit_exceeded",
         Error::MissingRoot => "missing_root",
         Error::MultipleRoots => "multiple_roots",
         Error::Io(_) => "io",
@@ -135,6 +138,7 @@ pub(crate) fn error_position(error: &Error) -> Option<u64> {
         Error::Xml { position, .. }
         | Error::Attribute { position, .. }
         | Error::Encoding { position, .. }
+        | Error::UnsupportedEncoding { position, .. }
         | Error::Utf8 { position, .. }
         | Error::MismatchedEnd { position, .. }
         | Error::UnexpectedEnd { position, .. }
@@ -145,11 +149,13 @@ pub(crate) fn error_position(error: &Error) -> Option<u64> {
         | Error::IllegalCharacter { position, .. }
         | Error::DocTypeForbidden { position }
         | Error::DocTypeTooLong { position, .. } => Some(*position),
+        Error::LimitExceeded { position, .. } => Some(*position),
         Error::MissingRoot
         | Error::MultipleRoots
         | Error::InvalidName { .. }
         | Error::InvalidXmlToken { .. }
         | Error::Io(_) => None,
+        Error::UndeclaredEntityReference { .. } => None,
     }
 }
 

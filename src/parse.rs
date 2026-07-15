@@ -9,6 +9,8 @@ use quick_xml::Reader;
 use quick_xml::encoding::Decoder;
 use quick_xml::events::{BytesStart, Event};
 use std::borrow::Cow;
+use std::cell::OnceCell;
+use std::io::Read;
 use std::ops::Range;
 use std::str;
 
@@ -17,6 +19,24 @@ use std::str;
 /// entity-definition payloads bounded while leaving room for a small
 /// declaration.
 pub const DEFAULT_MAX_DOCTYPE_LEN: usize = 4096;
+/// Default maximum input size accepted by the parser.
+pub const DEFAULT_MAX_INPUT_LEN: usize = 16 * 1024 * 1024;
+/// Default maximum XML element nesting depth.
+pub const DEFAULT_MAX_DEPTH: usize = 128;
+/// Default maximum number of XML nodes.
+pub const DEFAULT_MAX_NODES: usize = 100_000;
+/// Default maximum number of attributes on one element.
+pub const DEFAULT_MAX_ATTRIBUTES_PER_ELEMENT: usize = 256;
+
+/// Parser resource whose configured limit was exceeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ParseLimit {
+    InputLength,
+    Depth,
+    Nodes,
+    AttributesPerElement,
+}
 
 /// Options controlling how strictly [`crate::parse_with`] treats the input.
 ///
@@ -31,6 +51,14 @@ pub struct ParseOptions {
     /// payload. `None` disables the limit. Ignored when
     /// `reject_doctype` is set, since the declaration is rejected outright.
     pub max_doctype_len: Option<usize>,
+    /// Maximum input length in bytes.
+    pub max_input_len: Option<usize>,
+    /// Maximum element nesting depth.
+    pub max_depth: Option<usize>,
+    /// Maximum total XML node count.
+    pub max_nodes: Option<usize>,
+    /// Maximum attributes allowed on one element.
+    pub max_attributes_per_element: Option<usize>,
 }
 
 impl Default for ParseOptions {
@@ -38,6 +66,10 @@ impl Default for ParseOptions {
         Self {
             reject_doctype: false,
             max_doctype_len: Some(DEFAULT_MAX_DOCTYPE_LEN),
+            max_input_len: Some(DEFAULT_MAX_INPUT_LEN),
+            max_depth: Some(DEFAULT_MAX_DEPTH),
+            max_nodes: Some(DEFAULT_MAX_NODES),
+            max_attributes_per_element: Some(DEFAULT_MAX_ATTRIBUTES_PER_ELEMENT),
         }
     }
 }
@@ -63,10 +95,128 @@ impl ParseOptions {
         self.max_doctype_len = None;
         self
     }
+
+    /// Set the maximum input length in bytes.
+    #[must_use]
+    pub fn max_input_len(mut self, limit: usize) -> Self {
+        self.max_input_len = Some(limit);
+        self
+    }
+
+    /// Disable the maximum input length.
+    #[must_use]
+    pub fn without_input_limit(mut self) -> Self {
+        self.max_input_len = None;
+        self
+    }
+
+    /// Set the maximum element nesting depth.
+    #[must_use]
+    pub fn max_depth(mut self, limit: usize) -> Self {
+        self.max_depth = Some(limit);
+        self
+    }
+
+    /// Disable the maximum element nesting depth.
+    #[must_use]
+    pub fn without_depth_limit(mut self) -> Self {
+        self.max_depth = None;
+        self
+    }
+
+    /// Set the maximum total XML node count.
+    #[must_use]
+    pub fn max_nodes(mut self, limit: usize) -> Self {
+        self.max_nodes = Some(limit);
+        self
+    }
+
+    /// Disable the maximum XML node count.
+    #[must_use]
+    pub fn without_node_limit(mut self) -> Self {
+        self.max_nodes = None;
+        self
+    }
+
+    /// Set the maximum attributes allowed on one element.
+    #[must_use]
+    pub fn max_attributes_per_element(mut self, limit: usize) -> Self {
+        self.max_attributes_per_element = Some(limit);
+        self
+    }
+
+    /// Disable the per-element attribute limit.
+    #[must_use]
+    pub fn without_attribute_limit(mut self) -> Self {
+        self.max_attributes_per_element = None;
+        self
+    }
 }
 
 pub(crate) fn parse(input: &str) -> Result<AdfDocument<'_>> {
     parse_with(input, &ParseOptions::default())
+}
+
+pub(crate) fn parse_owned(input: String, options: &ParseOptions) -> Result<AdfDocument<'static>> {
+    let document = parse_with(&input, options)?;
+    let AdfDocument {
+        parse_options,
+        raw_root,
+        prolog,
+        epilog,
+        adf,
+        prospect_spans,
+        dirty_prospects,
+        dirty_all,
+        ..
+    } = document;
+    let owned_root = raw_root.into_inner().map(XmlElement::into_owned);
+    let owned_adf = adf.into_owned();
+    let owned_prolog = prolog.into_iter().map(XmlNode::into_owned).collect();
+    let owned_epilog = epilog.into_iter().map(XmlNode::into_owned).collect();
+    let raw_root = OnceCell::new();
+    if let Some(root) = owned_root {
+        let _ = raw_root.set(root);
+    }
+    Ok(AdfDocument {
+        original: Cow::Owned(input),
+        parse_options,
+        raw_root,
+        prolog: owned_prolog,
+        epilog: owned_epilog,
+        adf: owned_adf,
+        prospect_spans,
+        dirty_prospects,
+        dirty_all,
+    })
+}
+
+pub(crate) fn parse_bytes(input: &[u8], options: &ParseOptions) -> Result<AdfDocument<'static>> {
+    check_limit(
+        options.max_input_len,
+        input.len(),
+        ParseLimit::InputLength,
+        0,
+    )?;
+    let value = String::from_utf8(input.to_vec()).map_err(|error| Error::Utf8 {
+        position: error.utf8_error().valid_up_to() as u64,
+        source: error.utf8_error(),
+    })?;
+    parse_owned(value, options)
+}
+
+pub(crate) fn parse_reader<R: Read>(
+    reader: R,
+    options: &ParseOptions,
+) -> Result<AdfDocument<'static>> {
+    let mut bytes = Vec::new();
+    match options.max_input_len {
+        Some(maximum) => reader
+            .take(maximum.saturating_add(1) as u64)
+            .read_to_end(&mut bytes)?,
+        None => reader.take(u64::MAX).read_to_end(&mut bytes)?,
+    };
+    parse_bytes(&bytes, options)
 }
 
 pub(crate) fn parse_with<'a>(input: &'a str, options: &ParseOptions) -> Result<AdfDocument<'a>> {
@@ -78,14 +228,14 @@ pub(crate) fn parse_with<'a>(input: &'a str, options: &ParseOptions) -> Result<A
     );
     let _span_guard = span.enter();
 
-    let document_tree = match parse_document_tree(input, options) {
-        Ok(document_tree) => document_tree,
+    let parsed = match parse_document_tree(input, options) {
+        Ok(parsed) => parsed,
         Err(error) => {
             crate::trace::record_error("parse", &error);
             return Err(error);
         }
     };
-    let (adf, prospect_spans) = adf_from_root(document_tree.root)?;
+    let (adf, prospect_spans) = adf_from_root(parsed.root)?;
     if tracing::enabled!(tracing::Level::DEBUG) {
         let stats = crate::trace::DocumentStats::from_adf(&adf);
         tracing::debug!(
@@ -102,8 +252,8 @@ pub(crate) fn parse_with<'a>(input: &'a str, options: &ParseOptions) -> Result<A
         *options,
         adf,
         prospect_spans,
-        document_tree.prolog,
-        document_tree.epilog,
+        parsed.prolog,
+        parsed.epilog,
     ))
 }
 
@@ -111,13 +261,22 @@ pub(crate) fn parse_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<X
     Ok(parse_document_tree(input, options)?.root)
 }
 
-struct DocumentTree<'a> {
-    root: XmlElement<'a>,
-    prolog: Vec<XmlNode<'a>>,
-    epilog: Vec<XmlNode<'a>>,
+pub(crate) struct ParsedDocumentTree<'a> {
+    pub root: XmlElement<'a>,
+    pub prolog: Vec<XmlNode<'a>>,
+    pub epilog: Vec<XmlNode<'a>>,
 }
 
-fn parse_document_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<DocumentTree<'a>> {
+pub(crate) fn parse_document_tree<'a>(
+    input: &'a str,
+    options: &ParseOptions,
+) -> Result<ParsedDocumentTree<'a>> {
+    check_limit(
+        options.max_input_len,
+        input.len(),
+        ParseLimit::InputLength,
+        0,
+    )?;
     let mut reader = Reader::from_str(input);
     {
         let config = reader.config_mut();
@@ -128,6 +287,7 @@ fn parse_document_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<Doc
     let mut root: Option<XmlElement<'_>> = None;
     let mut prolog = Vec::new();
     let mut epilog = Vec::new();
+    let mut node_count = 0_usize;
 
     loop {
         let event_start = reader.buffer_position() as usize;
@@ -136,15 +296,32 @@ fn parse_document_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<Doc
             .read_event()
             .map_err(|source| Error::xml(position, source))?
         {
-            Event::Start(start) => stack.push(element_from_start(
-                input,
-                &reader,
-                start,
-                position,
-                event_start,
-                reader.buffer_position() as usize,
-            )?),
+            Event::Start(start) => {
+                check_limit(
+                    options.max_depth,
+                    stack.len() + 1,
+                    ParseLimit::Depth,
+                    position,
+                )?;
+                record_node(&mut node_count, options, position)?;
+                stack.push(element_from_start(
+                    input,
+                    &reader,
+                    start,
+                    options,
+                    position,
+                    event_start,
+                    reader.buffer_position() as usize,
+                )?);
+            }
             Event::Empty(start) => {
+                check_limit(
+                    options.max_depth,
+                    stack.len() + 1,
+                    ParseLimit::Depth,
+                    position,
+                )?;
+                record_node(&mut node_count, options, position)?;
                 append_element(
                     &mut stack,
                     &mut root,
@@ -152,6 +329,7 @@ fn parse_document_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<Doc
                         input,
                         &reader,
                         start,
+                        options,
                         position,
                         event_start,
                         reader.buffer_position() as usize,
@@ -175,6 +353,7 @@ fn parse_document_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<Doc
                 append_element(&mut stack, &mut root, element)?;
             }
             Event::Text(text) => {
+                record_node(&mut node_count, options, position)?;
                 let text = text
                     .xml_content()
                     .map_err(|source| Error::encoding(position, source))?;
@@ -182,13 +361,14 @@ fn parse_document_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<Doc
                 append_node(
                     &mut stack,
                     root.is_some(),
-                    XmlNode::Text(text),
-                    position,
                     &mut prolog,
                     &mut epilog,
+                    XmlNode::Text(text),
+                    position,
                 )?;
             }
             Event::CData(cdata) => {
+                record_node(&mut node_count, options, position)?;
                 let cdata = cdata
                     .decode()
                     .map_err(|source| Error::encoding(position, source))?;
@@ -196,13 +376,14 @@ fn parse_document_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<Doc
                 append_node(
                     &mut stack,
                     root.is_some(),
-                    XmlNode::CData(cdata),
-                    position,
                     &mut prolog,
                     &mut epilog,
+                    XmlNode::CData(cdata),
+                    position,
                 )?;
             }
             Event::Comment(comment) => {
+                record_node(&mut node_count, options, position)?;
                 let comment = comment
                     .decode()
                     .map_err(|source| Error::encoding(position, source))?;
@@ -210,32 +391,41 @@ fn parse_document_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<Doc
                 append_node(
                     &mut stack,
                     root.is_some(),
-                    XmlNode::Comment(comment),
-                    position,
                     &mut prolog,
                     &mut epilog,
+                    XmlNode::Comment(comment),
+                    position,
                 )?;
             }
-            Event::PI(pi) => append_node(
-                &mut stack,
-                root.is_some(),
-                XmlNode::ProcessingInstruction(Cow::Owned(validated_name_payload(
-                    pi.as_ref(),
+            Event::PI(pi) => {
+                record_node(&mut node_count, options, position)?;
+                append_node(
+                    &mut stack,
+                    root.is_some(),
+                    &mut prolog,
+                    &mut epilog,
+                    XmlNode::ProcessingInstruction(Cow::Owned(validated_name_payload(
+                        pi.as_ref(),
+                        position,
+                    )?)),
                     position,
-                )?)),
-                position,
-                &mut prolog,
-                &mut epilog,
-            )?,
-            Event::Decl(decl) => append_node(
-                &mut stack,
-                root.is_some(),
-                XmlNode::Declaration(Cow::Owned(validated_name_payload(decl.as_ref(), position)?)),
-                position,
-                &mut prolog,
-                &mut epilog,
-            )?,
+                )?;
+            }
+            Event::Decl(decl) => {
+                record_node(&mut node_count, options, position)?;
+                let declaration = validated_name_payload(decl.as_ref(), position)?;
+                ensure_utf8_declaration(&declaration, position)?;
+                append_node(
+                    &mut stack,
+                    root.is_some(),
+                    &mut prolog,
+                    &mut epilog,
+                    XmlNode::Declaration(Cow::Owned(declaration)),
+                    position,
+                )?;
+            }
             Event::DocType(doc_type) => {
+                record_node(&mut node_count, options, position)?;
                 if options.reject_doctype {
                     return Err(Error::DocTypeForbidden { position });
                 }
@@ -259,13 +449,14 @@ fn parse_document_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<Doc
                 append_node(
                     &mut stack,
                     root.is_some(),
-                    XmlNode::DocType(decoded),
-                    position,
                     &mut prolog,
                     &mut epilog,
+                    XmlNode::DocType(decoded),
+                    position,
                 )?;
             }
             Event::GeneralRef(general_ref) => {
+                record_node(&mut node_count, options, position)?;
                 if stack.is_empty() {
                     return Err(Error::ContentOutsideRoot { position });
                 }
@@ -275,10 +466,10 @@ fn parse_document_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<Doc
                 append_node(
                     &mut stack,
                     root.is_some(),
-                    general_ref_node(entity, position)?,
-                    position,
                     &mut prolog,
                     &mut epilog,
+                    general_ref_node(entity, position)?,
+                    position,
                 )?;
             }
             Event::Eof => break,
@@ -292,17 +483,45 @@ fn parse_document_tree<'a>(input: &'a str, options: &ParseOptions) -> Result<Doc
         });
     }
 
-    Ok(DocumentTree {
+    Ok(ParsedDocumentTree {
         root: root.ok_or(Error::MissingRoot)?,
         prolog,
         epilog,
     })
 }
 
+fn ensure_utf8_declaration(declaration: &str, position: u64) -> Result<()> {
+    let lowercase = declaration.to_ascii_lowercase();
+    let Some(index) = lowercase.find("encoding") else {
+        return Ok(());
+    };
+    let rest = declaration[index + "encoding".len()..].trim_start();
+    let Some(rest) = rest.strip_prefix('=') else {
+        return Ok(());
+    };
+    let rest = rest.trim_start();
+    let Some(quote) = rest.chars().next().filter(|ch| matches!(ch, '\'' | '"')) else {
+        return Ok(());
+    };
+    let value = rest[quote.len_utf8()..]
+        .split(quote)
+        .next()
+        .unwrap_or_default();
+    if value.eq_ignore_ascii_case("utf-8") || value.eq_ignore_ascii_case("utf8") {
+        Ok(())
+    } else {
+        Err(Error::UnsupportedEncoding {
+            encoding: value.to_owned(),
+            position,
+        })
+    }
+}
+
 fn element_from_start<'a>(
     input: &'a str,
     reader: &Reader<&'a [u8]>,
     start: BytesStart<'a>,
+    options: &ParseOptions,
     position: u64,
     span_start: usize,
     span_end: usize,
@@ -317,6 +536,12 @@ fn element_from_start<'a>(
             name: attr_name,
             value,
         });
+        check_limit(
+            options.max_attributes_per_element,
+            attributes.len(),
+            ParseLimit::AttributesPerElement,
+            position,
+        )?;
     }
 
     Ok(XmlElement {
@@ -348,10 +573,10 @@ fn append_element<'a>(
 fn append_node<'a>(
     stack: &mut [XmlElement<'a>],
     has_root: bool,
-    node: XmlNode<'a>,
-    position: u64,
     prolog: &mut Vec<XmlNode<'a>>,
     epilog: &mut Vec<XmlNode<'a>>,
+    node: XmlNode<'a>,
+    position: u64,
 ) -> Result<()> {
     if let Some(parent) = stack.last_mut() {
         parent.children.push(node);
@@ -368,6 +593,25 @@ fn append_node<'a>(
     }
 
     Err(Error::ContentOutsideRoot { position })
+}
+
+fn record_node(count: &mut usize, options: &ParseOptions, position: u64) -> Result<()> {
+    *count = count.saturating_add(1);
+    check_limit(options.max_nodes, *count, ParseLimit::Nodes, position)
+}
+
+fn check_limit(limit: Option<usize>, actual: usize, kind: ParseLimit, position: u64) -> Result<()> {
+    if let Some(maximum) = limit
+        && actual > maximum
+    {
+        return Err(Error::LimitExceeded {
+            limit: kind,
+            maximum,
+            actual,
+            position,
+        });
+    }
+    Ok(())
 }
 
 fn name_from_bytes(bytes: &[u8], position: u64) -> Result<&str> {
@@ -658,26 +902,26 @@ fn prospect_from_element<'a>(element: XmlElement<'a>) -> Prospect<'a> {
         };
         match child.name.as_ref() {
             "id" => prospect.ids.push(id_from_element(child)),
-            "requestdate" => set_singleton(
+            "requestdate" => set_singular(
                 &mut prospect.request_date,
                 &mut prospect.extensions,
                 child,
                 text_from_element,
             ),
             "vehicle" => prospect.vehicles.push(vehicle_from_element(child)),
-            "customer" => set_singleton(
+            "customer" => set_singular(
                 &mut prospect.customer,
                 &mut prospect.extensions,
                 child,
                 customer_from_element,
             ),
-            "vendor" => set_singleton(
+            "vendor" => set_singular(
                 &mut prospect.vendor,
                 &mut prospect.extensions,
                 child,
                 vendor_from_element,
             ),
-            "provider" => set_singleton(
+            "provider" => set_singular(
                 &mut prospect.provider,
                 &mut prospect.extensions,
                 child,
@@ -711,67 +955,67 @@ fn vehicle_from_element<'a>(element: XmlElement<'a>) -> Vehicle<'a> {
         };
         match child.name.as_ref() {
             "id" => vehicle.ids.push(id_from_element(child)),
-            "year" => set_singleton(
+            "year" => set_singular(
                 &mut vehicle.year,
                 &mut vehicle.extensions,
                 child,
                 text_from_element,
             ),
-            "make" => set_singleton(
+            "make" => set_singular(
                 &mut vehicle.make,
                 &mut vehicle.extensions,
                 child,
                 text_from_element,
             ),
-            "model" => set_singleton(
+            "model" => set_singular(
                 &mut vehicle.model,
                 &mut vehicle.extensions,
                 child,
                 text_from_element,
             ),
-            "vin" => set_singleton(
+            "vin" => set_singular(
                 &mut vehicle.vin,
                 &mut vehicle.extensions,
                 child,
                 text_from_element,
             ),
-            "stock" => set_singleton(
+            "stock" => set_singular(
                 &mut vehicle.stock,
                 &mut vehicle.extensions,
                 child,
                 text_from_element,
             ),
-            "trim" => set_singleton(
+            "trim" => set_singular(
                 &mut vehicle.trim,
                 &mut vehicle.extensions,
                 child,
                 text_from_element,
             ),
-            "doors" => set_singleton(
+            "doors" => set_singular(
                 &mut vehicle.doors,
                 &mut vehicle.extensions,
                 child,
                 text_from_element,
             ),
-            "bodystyle" => set_singleton(
+            "bodystyle" => set_singular(
                 &mut vehicle.body_style,
                 &mut vehicle.extensions,
                 child,
                 text_from_element,
             ),
-            "transmission" => set_singleton(
+            "transmission" => set_singular(
                 &mut vehicle.transmission,
                 &mut vehicle.extensions,
                 child,
                 text_from_element,
             ),
-            "odometer" => set_singleton(
+            "odometer" => set_singular(
                 &mut vehicle.odometer,
                 &mut vehicle.extensions,
                 child,
                 text_from_element,
             ),
-            "condition" => set_singleton(
+            "condition" => set_singular(
                 &mut vehicle.condition,
                 &mut vehicle.extensions,
                 child,
@@ -782,20 +1026,20 @@ fn vehicle_from_element<'a>(element: XmlElement<'a>) -> Vehicle<'a> {
                 .push(color_combination_from_element(child)),
             "imagetag" => vehicle.image_tags.push(text_from_element(child)),
             "price" => vehicle.prices.push(price_from_element(child)),
-            "pricecomments" => set_singleton(
+            "pricecomments" => set_singular(
                 &mut vehicle.price_comments,
                 &mut vehicle.extensions,
                 child,
                 text_from_element,
             ),
             "option" => vehicle.options.push(option_from_element(child)),
-            "finance" => set_singleton(
+            "finance" => set_singular(
                 &mut vehicle.finance,
                 &mut vehicle.extensions,
                 child,
                 finance_from_element,
             ),
-            "comments" => set_singleton(
+            "comments" => set_singular(
                 &mut vehicle.comments,
                 &mut vehicle.extensions,
                 child,
@@ -825,19 +1069,19 @@ fn color_combination_from_element<'a>(element: XmlElement<'a>) -> ColorCombinati
             continue;
         };
         match child.name.as_ref() {
-            "interiorcolor" => set_singleton(
+            "interiorcolor" => set_singular(
                 &mut colors.interior_color,
                 &mut colors.extensions,
                 child,
                 text_from_element,
             ),
-            "exteriorcolor" => set_singleton(
+            "exteriorcolor" => set_singular(
                 &mut colors.exterior_color,
                 &mut colors.extensions,
                 child,
                 text_from_element,
             ),
-            "preference" => set_singleton(
+            "preference" => set_singular(
                 &mut colors.preference,
                 &mut colors.extensions,
                 child,
@@ -866,25 +1110,25 @@ fn option_from_element<'a>(element: XmlElement<'a>) -> VehicleOption<'a> {
             continue;
         };
         match child.name.as_ref() {
-            "optionname" => set_singleton(
+            "optionname" => set_singular(
                 &mut option.option_name,
                 &mut option.extensions,
                 child,
                 text_from_element,
             ),
-            "manufacturercode" => set_singleton(
+            "manufacturercode" => set_singular(
                 &mut option.manufacturer_code,
                 &mut option.extensions,
                 child,
                 text_from_element,
             ),
-            "stock" => set_singleton(
+            "stock" => set_singular(
                 &mut option.stock,
                 &mut option.extensions,
                 child,
                 text_from_element,
             ),
-            "weighting" => set_singleton(
+            "weighting" => set_singular(
                 &mut option.weighting,
                 &mut option.extensions,
                 child,
@@ -914,7 +1158,7 @@ fn finance_from_element<'a>(element: XmlElement<'a>) -> Finance<'a> {
             continue;
         };
         match child.name.as_ref() {
-            "method" => set_singleton(
+            "method" => set_singular(
                 &mut finance.method,
                 &mut finance.extensions,
                 child,
@@ -947,13 +1191,13 @@ fn customer_from_element<'a>(element: XmlElement<'a>) -> Customer<'a> {
         match child.name.as_ref() {
             "id" => customer.ids.push(id_from_element(child)),
             "contact" => customer.contacts.push(contact_from_element(child)),
-            "timeframe" => set_singleton(
+            "timeframe" => set_singular(
                 &mut customer.timeframe,
                 &mut customer.extensions,
                 child,
                 timeframe_from_element,
             ),
-            "comments" => set_singleton(
+            "comments" => set_singular(
                 &mut customer.comments,
                 &mut customer.extensions,
                 child,
@@ -982,19 +1226,19 @@ fn timeframe_from_element<'a>(element: XmlElement<'a>) -> Timeframe<'a> {
             continue;
         };
         match child.name.as_ref() {
-            "description" => set_singleton(
+            "description" => set_singular(
                 &mut timeframe.description,
                 &mut timeframe.extensions,
                 child,
                 text_from_element,
             ),
-            "earliestdate" => set_singleton(
+            "earliestdate" => set_singular(
                 &mut timeframe.earliest_date,
                 &mut timeframe.extensions,
                 child,
                 text_from_element,
             ),
-            "latestdate" => set_singleton(
+            "latestdate" => set_singular(
                 &mut timeframe.latest_date,
                 &mut timeframe.extensions,
                 child,
@@ -1024,13 +1268,13 @@ fn vendor_from_element<'a>(element: XmlElement<'a>) -> Vendor<'a> {
         };
         match child.name.as_ref() {
             "id" => vendor.ids.push(id_from_element(child)),
-            "vendorname" => set_singleton(
+            "vendorname" => set_singular(
                 &mut vendor.vendor_name,
                 &mut vendor.extensions,
                 child,
                 text_from_element,
             ),
-            "url" => set_singleton(
+            "url" => set_singular(
                 &mut vendor.url,
                 &mut vendor.extensions,
                 child,
@@ -1061,31 +1305,31 @@ fn provider_from_element<'a>(element: XmlElement<'a>) -> Provider<'a> {
         };
         match child.name.as_ref() {
             "id" => provider.ids.push(id_from_element(child)),
-            "name" => set_singleton(
+            "name" => set_singular(
                 &mut provider.name,
                 &mut provider.extensions,
                 child,
                 name_from_element,
             ),
-            "service" => set_singleton(
+            "service" => set_singular(
                 &mut provider.service,
                 &mut provider.extensions,
                 child,
                 text_from_element,
             ),
-            "url" => set_singleton(
+            "url" => set_singular(
                 &mut provider.url,
                 &mut provider.extensions,
                 child,
                 text_from_element,
             ),
-            "email" => set_singleton(
+            "email" => set_singular(
                 &mut provider.email,
                 &mut provider.extensions,
                 child,
                 text_from_element,
             ),
-            "phone" => set_singleton(
+            "phone" => set_singular(
                 &mut provider.phone,
                 &mut provider.extensions,
                 child,
@@ -1145,31 +1389,31 @@ fn address_from_element<'a>(element: XmlElement<'a>) -> Address<'a> {
         };
         match child.name.as_ref() {
             "street" => address.streets.push(text_from_element(child)),
-            "apartment" => set_singleton(
+            "apartment" => set_singular(
                 &mut address.apartment,
                 &mut address.extensions,
                 child,
                 text_from_element,
             ),
-            "city" => set_singleton(
+            "city" => set_singular(
                 &mut address.city,
                 &mut address.extensions,
                 child,
                 text_from_element,
             ),
-            "regioncode" => set_singleton(
+            "regioncode" => set_singular(
                 &mut address.region_code,
                 &mut address.extensions,
                 child,
                 text_from_element,
             ),
-            "postalcode" => set_singleton(
+            "postalcode" => set_singular(
                 &mut address.postal_code,
                 &mut address.extensions,
                 child,
                 text_from_element,
             ),
-            "country" => set_singleton(
+            "country" => set_singular(
                 &mut address.country,
                 &mut address.extensions,
                 child,
@@ -1259,19 +1503,6 @@ fn text_parts<'a>(children: Vec<XmlNode<'a>>) -> Vec<TextPart<'a>> {
     parts
 }
 
-fn set_singleton<'a, T>(
-    slot: &mut Option<T>,
-    extensions: &mut Vec<XmlNode<'a>>,
-    element: XmlElement<'a>,
-    convert: fn(XmlElement<'a>) -> T,
-) {
-    if slot.is_none() {
-        *slot = Some(convert(element));
-    } else {
-        extensions.push(XmlNode::Element(element));
-    }
-}
-
 fn attr<'a>(attributes: &[Attribute<'a>], name: &str) -> Option<Cow<'a, str>> {
     attributes
         .iter()
@@ -1290,5 +1521,18 @@ fn element_child_or_extension<'a>(
             extensions.push(extension);
             None
         }
+    }
+}
+
+fn set_singular<'a, T>(
+    slot: &mut Option<T>,
+    extensions: &mut Vec<XmlNode<'a>>,
+    child: XmlElement<'a>,
+    convert: impl FnOnce(XmlElement<'a>) -> T,
+) {
+    if slot.is_some() {
+        extensions.push(XmlNode::Element(child));
+    } else {
+        *slot = Some(convert(child));
     }
 }

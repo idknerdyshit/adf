@@ -30,6 +30,24 @@ pub struct Attribute<'a> {
     pub value: Cow<'a, str>,
 }
 
+impl<'a> Attribute<'a> {
+    /// Construct an XML attribute.
+    pub fn new(name: impl Into<Cow<'a, str>>, value: impl Into<Cow<'a, str>>) -> Self {
+        Self {
+            name: name.into(),
+            value: value.into(),
+        }
+    }
+
+    /// Convert this attribute into an owned value.
+    pub fn into_owned(self) -> Attribute<'static> {
+        Attribute {
+            name: Cow::Owned(self.name.into_owned()),
+            value: Cow::Owned(self.value.into_owned()),
+        }
+    }
+}
+
 /// Raw XML element used for extension content and [`AdfDocument::root`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XmlElement<'a> {
@@ -41,6 +59,22 @@ pub struct XmlElement<'a> {
     pub children: Vec<XmlNode<'a>>,
     /// Byte span covering the complete element in the original input.
     pub span: Span,
+}
+
+impl XmlElement<'_> {
+    /// Convert this raw element into an owned value.
+    pub fn into_owned(self) -> XmlElement<'static> {
+        XmlElement {
+            name: Cow::Owned(self.name.into_owned()),
+            attributes: self
+                .attributes
+                .into_iter()
+                .map(Attribute::into_owned)
+                .collect(),
+            children: self.children.into_iter().map(XmlNode::into_owned).collect(),
+            span: self.span,
+        }
+    }
 }
 
 /// Raw XML node retained for extension and mixed-content round-tripping.
@@ -64,6 +98,24 @@ pub enum XmlNode<'a> {
     DocType(Cow<'a, str>),
 }
 
+impl XmlNode<'_> {
+    /// Convert this raw node into an owned value.
+    pub fn into_owned(self) -> XmlNode<'static> {
+        match self {
+            XmlNode::Element(value) => XmlNode::Element(value.into_owned()),
+            XmlNode::Text(value) => XmlNode::Text(Cow::Owned(value.into_owned())),
+            XmlNode::CData(value) => XmlNode::CData(Cow::Owned(value.into_owned())),
+            XmlNode::EntityRef(value) => XmlNode::EntityRef(Cow::Owned(value.into_owned())),
+            XmlNode::Comment(value) => XmlNode::Comment(Cow::Owned(value.into_owned())),
+            XmlNode::ProcessingInstruction(value) => {
+                XmlNode::ProcessingInstruction(Cow::Owned(value.into_owned()))
+            }
+            XmlNode::Declaration(value) => XmlNode::Declaration(Cow::Owned(value.into_owned())),
+            XmlNode::DocType(value) => XmlNode::DocType(Cow::Owned(value.into_owned())),
+        }
+    }
+}
+
 /// Parsed ADF document plus original-input preservation state.
 ///
 /// Mutating through [`AdfDocument::prospect_mut`] marks a single prospect dirty
@@ -72,20 +124,20 @@ pub enum XmlNode<'a> {
 /// original-preserving writes to fall back to normalized typed output.
 #[derive(Debug, Clone)]
 pub struct AdfDocument<'a> {
-    pub(crate) original: &'a str,
+    pub(crate) original: Cow<'a, str>,
     pub(crate) parse_options: ParseOptions,
     pub(crate) raw_root: OnceCell<XmlElement<'a>>,
-    pub(crate) adf: Adf<'a>,
-    pub(crate) prospect_spans: Vec<Range<usize>>,
     pub(crate) prolog: Vec<XmlNode<'a>>,
     pub(crate) epilog: Vec<XmlNode<'a>>,
+    pub(crate) adf: Adf<'a>,
+    pub(crate) prospect_spans: Vec<Range<usize>>,
     pub(crate) dirty_prospects: Vec<bool>,
     pub(crate) dirty_all: bool,
 }
 
 impl<'a> AdfDocument<'a> {
     pub(crate) fn new(
-        original: &'a str,
+        original: impl Into<Cow<'a, str>>,
         parse_options: ParseOptions,
         adf: Adf<'a>,
         prospect_spans: Vec<Range<usize>>,
@@ -94,21 +146,21 @@ impl<'a> AdfDocument<'a> {
     ) -> Self {
         let dirty_prospects = vec![false; prospect_spans.len()];
         Self {
-            original,
+            original: original.into(),
             parse_options,
             raw_root: OnceCell::new(),
-            adf,
-            prospect_spans,
             prolog,
             epilog,
+            adf,
+            prospect_spans,
             dirty_prospects,
             dirty_all: false,
         }
     }
 
     /// Return the exact XML input used to create this document.
-    pub fn original(&self) -> &'a str {
-        self.original
+    pub fn original(&self) -> &str {
+        self.original.as_ref()
     }
 
     /// Return the raw XML root, reparsing the original input on first access.
@@ -123,15 +175,42 @@ impl<'a> AdfDocument<'a> {
                 "parsing lazy raw XML tree"
             );
         }
-        self.raw_root.get_or_init(|| {
-            crate::parse::parse_tree(self.original, &self.parse_options)
+        self.raw_root.get_or_init(|| match &self.original {
+            Cow::Borrowed(input) => crate::parse::parse_tree(input, &self.parse_options)
+                .expect("original input was already parsed successfully"),
+            Cow::Owned(input) => crate::parse::parse_tree(input, &self.parse_options)
                 .expect("original input was already parsed successfully")
+                .into_owned(),
         })
     }
 
     /// Return the typed ADF model.
     pub fn adf(&self) -> &Adf<'a> {
         &self.adf
+    }
+
+    /// Consume the document and return its typed ADF model.
+    pub fn into_adf(self) -> Adf<'a> {
+        self.adf
+    }
+
+    /// Convert the document and all retained XML data into owned values.
+    pub fn into_owned(self) -> AdfDocument<'static> {
+        let raw_root = OnceCell::new();
+        if let Some(root) = self.raw_root.into_inner() {
+            let _ = raw_root.set(root.into_owned());
+        }
+        AdfDocument {
+            original: Cow::Owned(self.original.into_owned()),
+            parse_options: self.parse_options,
+            raw_root,
+            prolog: self.prolog.into_iter().map(XmlNode::into_owned).collect(),
+            epilog: self.epilog.into_iter().map(XmlNode::into_owned).collect(),
+            adf: self.adf.into_owned(),
+            prospect_spans: self.prospect_spans,
+            dirty_prospects: self.dirty_prospects,
+            dirty_all: self.dirty_all,
+        }
     }
 
     /// Mutably access the typed ADF model and mark the whole document dirty.
@@ -166,7 +245,27 @@ impl<'a> AdfDocument<'a> {
     /// Strict mode promotes missing required structure to errors. Enum and
     /// lightweight format issues remain warnings.
     pub fn validate_strict(&self) -> validate::ValidationReport<'a> {
-        validate::validate_with(&self.adf, validate::ValidationOptions { strict: true })
+        validate::validate_with(
+            &self.adf,
+            validate::ValidationOptions::default().profile(validate::ValidationProfile::Structural),
+        )
+    }
+
+    /// Validate against the exact ADF 1.0 conformance profile.
+    pub fn validate_adf_1_0(&self) -> validate::ValidationReport<'a> {
+        validate::validate_with(
+            &self.adf,
+            validate::ValidationOptions::default().profile(validate::ValidationProfile::Adf10),
+        )
+    }
+
+    /// Validate ADF 1.0 while permitting partner extension elements and attributes.
+    pub fn validate_adf_1_0_extended(&self) -> validate::ValidationReport<'a> {
+        validate::validate_with(
+            &self.adf,
+            validate::ValidationOptions::default()
+                .profile(validate::ValidationProfile::Adf10Extended),
+        )
     }
 
     /// Write XML while preserving unchanged original input where possible.
@@ -211,7 +310,7 @@ impl<'a> AdfDocument<'a> {
         let span = tracing::debug_span!("adf.write.typed");
         let _span_guard = span.enter();
 
-        match crate::write::write_adf(writer, &self.adf, &self.prolog, &self.epilog) {
+        match crate::write::write_document_typed(writer, self) {
             Ok(()) => {
                 if tracing::enabled!(tracing::Level::DEBUG) {
                     let stats = crate::trace::DocumentStats::from_adf(&self.adf);
@@ -233,6 +332,18 @@ impl<'a> AdfDocument<'a> {
         }
     }
 
+    /// Write the typed model with explicit normalized-output options.
+    ///
+    /// Unlike [`AdfDocument::write_typed`], this does not preserve the parsed
+    /// document prolog or epilog; `options` fully controls the generated prolog.
+    pub fn write_typed_with<W: Write>(
+        &self,
+        writer: W,
+        options: &crate::WriteOptions,
+    ) -> Result<()> {
+        crate::write::write_adf_with(writer, &self.adf, options)
+    }
+
     /// Return [`AdfDocument::write_original_preserving`] output as a string.
     pub fn to_original_preserving_string(&self) -> Result<String> {
         let mut bytes = Vec::new();
@@ -249,6 +360,13 @@ impl<'a> AdfDocument<'a> {
         let mut bytes = Vec::new();
         self.write_typed(&mut bytes)?;
         tracing::trace!(output_bytes = bytes.len(), "typed string created");
+        Ok(String::from_utf8(bytes).expect("ADF writer only emits UTF-8"))
+    }
+
+    /// Return [`AdfDocument::write_typed_with`] output as a string.
+    pub fn to_typed_string_with(&self, options: &crate::WriteOptions) -> Result<String> {
+        let mut bytes = Vec::new();
+        self.write_typed_with(&mut bytes, options)?;
         Ok(String::from_utf8(bytes).expect("ADF writer only emits UTF-8"))
     }
 
