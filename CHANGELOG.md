@@ -7,14 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-17
+
 ### Added
 
-- Added cross-platform CI for Rust 1.85 and stable, including formatting, Clippy, tests, rustdoc, and package verification.
-- Expanded the README with generation, owned-processing, extension-mutation, validation-profile, and interoperability guidance.
+- Add production ingestion example. (0767bd6)
+- Add cross-platform CI for Rust 1.85 and stable, including formatting, Clippy, tests, rustdoc, and package verification. (ea75e0d)
+- Add Criterion parsing benchmarks and document bench usage. (95cbddb)
 
 ### Changed
 
-- Lowered the declared minimum supported Rust version from 1.88 to 1.85 for the v1 compatibility baseline, including an MSRV-compatible Criterion version and syntax.
+- Lower the declared minimum supported Rust version from 1.88 to 1.85 for the v1 compatibility baseline, including an MSRV-compatible Criterion version and syntax. (ea75e0d)
+- Expand the README with generation, owned-processing, extension-mutation, validation-profile, and interoperability guidance. (ea75e0d)
+- Simplify ADF parsing and writing paths. (dd3310d)
+- Preserve round-trippable XML data across ADF parsing and writing. (80ce0c2)
+- Preserve XML data across typed rewrites. (a347be7)
 
 ## [0.5.0] - 2026-06-30
 
