@@ -189,13 +189,17 @@ pub(crate) fn parse_owned(input: String, options: &ParseOptions) -> Result<AdfDo
 }
 
 pub(crate) fn parse_bytes(input: &[u8], options: &ParseOptions) -> Result<AdfDocument<'static>> {
+    parse_byte_vec(input.to_vec(), options)
+}
+
+fn parse_byte_vec(bytes: Vec<u8>, options: &ParseOptions) -> Result<AdfDocument<'static>> {
     check_limit(
         options.max_input_len,
-        input.len(),
+        bytes.len(),
         ParseLimit::InputLength,
         0,
     )?;
-    let value = String::from_utf8(input.to_vec()).map_err(|error| Error::Utf8 {
+    let value = String::from_utf8(bytes).map_err(|error| Error::Utf8 {
         position: error.utf8_error().valid_up_to() as u64,
         source: error.utf8_error(),
     })?;
@@ -213,7 +217,7 @@ pub(crate) fn parse_reader<R: Read>(
             .read_to_end(&mut bytes)?,
         None => reader.take(u64::MAX).read_to_end(&mut bytes)?,
     };
-    parse_bytes(&bytes, options)
+    parse_byte_vec(bytes, options)
 }
 
 pub(crate) fn parse_with<'a>(input: &'a str, options: &ParseOptions) -> Result<AdfDocument<'a>> {
@@ -281,7 +285,7 @@ pub(super) trait EventConsumer<'a> {
 
     fn start(&mut self, element: XmlElement<'a>, position: u64) -> Result<()>;
     fn empty(&mut self, element: XmlElement<'a>, position: u64) -> Result<()>;
-    fn end(&mut self, name: Cow<'a, str>, span_end: usize, position: u64) -> Result<()>;
+    fn end(&mut self, span_end: usize, position: u64) -> Result<()>;
     fn node(&mut self, node: XmlNode<'a>, position: u64) -> Result<()>;
     fn finish(self, position: u64) -> Result<Self::Output>;
 }
@@ -349,9 +353,8 @@ where
                     position,
                 )?;
             }
-            Event::End(end) => {
-                let name = borrowed_name(input, end.name().as_ref(), position)?;
-                consumer.end(name, reader.buffer_position() as usize, position)?;
+            Event::End(_) => {
+                consumer.end(reader.buffer_position() as usize, position)?;
                 depth = depth.saturating_sub(1);
             }
             Event::Text(text) => {
@@ -450,18 +453,11 @@ impl<'a> EventConsumer<'a> for RawTreeBuilder<'a> {
         append_element(&mut self.stack, &mut self.root, element)
     }
 
-    fn end(&mut self, name: Cow<'a, str>, span_end: usize, position: u64) -> Result<()> {
+    fn end(&mut self, span_end: usize, position: u64) -> Result<()> {
         let mut element = self.stack.pop().ok_or_else(|| Error::UnexpectedEnd {
-            name: name.to_string(),
+            name: String::new(),
             position,
         })?;
-        if element.name != name {
-            return Err(Error::MismatchedEnd {
-                expected: element.name.into_owned(),
-                found: name.into_owned(),
-                position,
-            });
-        }
         element.span.end = span_end;
         append_element(&mut self.stack, &mut self.root, element)
     }
@@ -603,15 +599,15 @@ fn record_node(count: &mut usize, options: &ParseOptions, position: u64) -> Resu
 }
 
 fn check_limit(limit: Option<usize>, actual: usize, kind: ParseLimit, position: u64) -> Result<()> {
-    if let Some(maximum) = limit
-        && actual > maximum
-    {
-        return Err(Error::LimitExceeded {
-            limit: kind,
-            maximum,
-            actual,
-            position,
-        });
+    if let Some(maximum) = limit {
+        if actual > maximum {
+            return Err(Error::LimitExceeded {
+                limit: kind,
+                maximum,
+                actual,
+                position,
+            });
+        }
     }
     Ok(())
 }

@@ -344,6 +344,24 @@ fn rejects_non_adf_root() {
 }
 
 #[test]
+fn malformed_end_tag_errors_keep_their_positions() {
+    let mismatch = parse("<adf><prospect></adf>").unwrap_err();
+    assert!(
+        matches!(&mismatch, Error::Xml { position: 0, .. }),
+        "{mismatch:?}"
+    );
+    assert!(matches!(
+        parse("</adf>"),
+        Err(Error::Xml { position: 0, .. })
+    ));
+    let unclosed = parse("<adf><prospect>").unwrap_err();
+    assert!(
+        matches!(&unclosed, Error::UnexpectedEnd { name, position: 0 } if name == "prospect"),
+        "{unclosed:?}"
+    );
+}
+
+#[test]
 fn rejects_invalid_xml_comments() {
     assert!(parse("<adf><!--bad--comment--><prospect /></adf>").is_err());
     assert!(
@@ -382,6 +400,18 @@ fn rejects_xml_illegal_character_references_and_text() {
     assert!(matches!(
         parse(&direct_control),
         Err(Error::IllegalCharacter { .. })
+    ));
+
+    let non_ascii_illegal = format!(
+        "<adf><prospect><comments>{}</comments></prospect></adf>",
+        '\u{ffff}'
+    );
+    assert!(matches!(
+        parse(&non_ascii_illegal),
+        Err(Error::IllegalCharacter {
+            character: '\u{ffff}',
+            ..
+        })
     ));
 }
 
@@ -1285,6 +1315,62 @@ fn built_adf() -> Adf<'static> {
 }
 
 #[test]
+fn readme_primary_example_conforms_and_edits() {
+    let input = r#"<adf>
+      <prospect status="new">
+        <requestdate>2026-05-17T12:00:00-04:00</requestdate>
+        <vehicle><year>2024</year><make>Toyota</make><model>Camry</model></vehicle>
+        <customer><contact><name part="full">Jane Doe</name><email>jane@example.com</email></contact></customer>
+        <vendor>
+          <vendorname>Example Dealer</vendorname>
+          <contact><name part="full">Sales Team</name><phone>555-0100</phone></contact>
+        </vendor>
+      </prospect>
+    </adf>"#;
+
+    let mut document = parse(input).unwrap();
+    assert!(document.validate_adf_1_0().is_valid());
+
+    document.prospect_mut(0).unwrap().status = Some(Cow::Borrowed("resend"));
+    assert!(document.validate_adf_1_0().is_valid());
+    assert!(
+        document
+            .to_original_preserving_string()
+            .unwrap()
+            .contains(r#"<prospect status="resend">"#)
+    );
+}
+
+#[test]
+fn readme_generation_example_builds_and_conforms() {
+    let customer_contact = Contact::builder(
+        Name::new("Jane Doe"),
+        ContactMethod::Email("jane@example.com".into()),
+    )
+    .build();
+    let vendor_contact = Contact::builder(
+        Name::new("Sales Team"),
+        ContactMethod::Phone("555-0100".into()),
+    )
+    .build();
+
+    let model = Adf::builder(
+        Prospect::builder(
+            "2026-05-17T12:00:00-04:00",
+            Vehicle::builder("2024", "Toyota", "Camry").build(),
+            Customer::builder(customer_contact).build(),
+            Vendor::builder("Example Dealer", vendor_contact).build(),
+        )
+        .status("new")
+        .build(),
+    )
+    .build();
+
+    let xml = to_string(&model).unwrap();
+    assert!(parse(&xml).unwrap().validate_adf_1_0().is_valid());
+}
+
+#[test]
 fn builders_write_reparse_and_conform() {
     let minimal = Adf::builder(
         Prospect::builder(
@@ -1325,6 +1411,29 @@ fn builders_write_reparse_and_conform() {
     let reparsed = parse(&xml).expect("constructed output should reparse");
     assert!(reparsed.validate_adf_1_0().is_valid());
     assert!(reparsed.validate_adf_1_0_extended().is_valid());
+}
+
+#[test]
+fn readme_extension_example_inspects_mutates_and_rewrites() {
+    let input = r#"<adf><prospect><requestdate>2026-05-17T12:00:00-04:00</requestdate><vehicle><year>2024</year><make>Toyota</make><model>Camry</model><partner-score>97</partner-score></vehicle><customer><contact><name part="full">Jane Doe</name><email>jane@example.com</email></contact></customer><vendor><vendorname>Example Dealer</vendorname><contact><name part="full">Sales Team</name><phone>555-0100</phone></contact></vendor></prospect></adf>"#;
+    let mut document = parse(input).unwrap();
+    assert!(document.validate_adf_1_0_extended().is_valid());
+
+    let extensions = &mut document.prospect_mut(0).unwrap().vehicles[0].extensions;
+    let score = extensions.iter_mut().find_map(|node| match node {
+        XmlNode::Element(element) if element.name == "partner-score" => Some(element),
+        _ => None,
+    });
+    score.unwrap().children = vec![XmlNode::Text(Cow::Borrowed("98"))];
+
+    let output = document.to_original_preserving_string().unwrap();
+    assert!(output.contains("<partner-score>98</partner-score>"));
+    assert!(
+        parse(&output)
+            .unwrap()
+            .validate_adf_1_0_extended()
+            .is_valid()
+    );
 }
 
 #[test]

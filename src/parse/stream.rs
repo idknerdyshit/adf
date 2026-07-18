@@ -5,7 +5,6 @@ use crate::model::{
     Address, Adf, ColorCombination, Contact, Customer, Finance, Id, Name, Price, Prospect,
     Provider, TextElement, TextPart, Timeframe, Vehicle, VehicleOption, Vendor,
 };
-use std::borrow::Cow;
 use std::ops::Range;
 
 pub(super) struct ParsedTypedDocument<'a> {
@@ -60,8 +59,8 @@ impl<'a> EventConsumer<'a> for TypedAdfBuilder<'a> {
         Ok(())
     }
 
-    fn end(&mut self, name: Cow<'a, str>, span_end: usize, position: u64) -> Result<()> {
-        self.close(name, span_end, position)
+    fn end(&mut self, span_end: usize, position: u64) -> Result<()> {
+        self.close(span_end, position)
     }
 
     fn node(&mut self, node: XmlNode<'a>, position: u64) -> Result<()> {
@@ -85,7 +84,7 @@ impl<'a> EventConsumer<'a> for TypedAdfBuilder<'a> {
     fn finish(mut self, position: u64) -> Result<Self::Output> {
         if let Some(unclosed) = self.stack.pop() {
             return Err(Error::UnexpectedEnd {
-                name: unclosed.name.into_owned(),
+                name: unclosed.diagnostic_name().to_owned(),
                 position,
             });
         }
@@ -110,7 +109,7 @@ impl<'a> TypedAdfBuilder<'a> {
             if self.root_complete {
                 return Err(Error::MultipleRoots);
             }
-            if element.name.as_ref() != "adf" {
+            if tag != Tag::Adf {
                 self.unexpected_root = Some((element.name.to_string(), element.span.start as u64));
                 FrameType::Raw
             } else {
@@ -121,18 +120,11 @@ impl<'a> TypedAdfBuilder<'a> {
         Ok(())
     }
 
-    fn close(&mut self, name: Cow<'a, str>, span_end: usize, position: u64) -> Result<()> {
+    fn close(&mut self, span_end: usize, position: u64) -> Result<()> {
         let mut frame = self.stack.pop().ok_or_else(|| Error::UnexpectedEnd {
-            name: name.to_string(),
+            name: String::new(),
             position,
         })?;
-        if frame.name != name {
-            return Err(Error::MismatchedEnd {
-                expected: frame.name.into_owned(),
-                found: name.into_owned(),
-                position,
-            });
-        }
         frame.set_span_end(span_end);
 
         if let Some(parent) = self.stack.last_mut() {
@@ -153,7 +145,6 @@ impl<'a> TypedAdfBuilder<'a> {
 }
 
 struct Frame<'a> {
-    name: Cow<'a, str>,
     tag: Tag,
     kind: FrameKind<'a>,
 }
@@ -273,6 +264,65 @@ impl Tag {
             "postalcode" => Self::PostalCode,
             "country" => Self::Country,
             _ => Self::Other,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Adf => "adf",
+            Self::Prospect => "prospect",
+            Self::Id => "id",
+            Self::RequestDate => "requestdate",
+            Self::Vehicle => "vehicle",
+            Self::Customer => "customer",
+            Self::Vendor => "vendor",
+            Self::Provider => "provider",
+            Self::Year => "year",
+            Self::Make => "make",
+            Self::Model => "model",
+            Self::Vin => "vin",
+            Self::Stock => "stock",
+            Self::Trim => "trim",
+            Self::Doors => "doors",
+            Self::BodyStyle => "bodystyle",
+            Self::Transmission => "transmission",
+            Self::Odometer => "odometer",
+            Self::Condition => "condition",
+            Self::ColorCombination => "colorcombination",
+            Self::Image => "imagetag",
+            Self::Price => "price",
+            Self::PriceComments => "pricecomments",
+            Self::Option => "option",
+            Self::Finance => "finance",
+            Self::Comments => "comments",
+            Self::InteriorColor => "interiorcolor",
+            Self::ExteriorColor => "exteriorcolor",
+            Self::Preference => "preference",
+            Self::OptionName => "optionname",
+            Self::ManufacturerCode => "manufacturercode",
+            Self::Weighting => "weighting",
+            Self::Method => "method",
+            Self::Amount => "amount",
+            Self::Balance => "balance",
+            Self::Contact => "contact",
+            Self::Timeframe => "timeframe",
+            Self::Description => "description",
+            Self::EarliestDate => "earliestdate",
+            Self::LatestDate => "latestdate",
+            Self::VendorName => "vendorname",
+            Self::Url => "url",
+            Self::Name => "name",
+            Self::Service => "service",
+            Self::Email => "email",
+            Self::Phone => "phone",
+            Self::Address => "address",
+            Self::Street => "street",
+            Self::Apartment => "apartment",
+            Self::City => "city",
+            Self::RegionCode => "regioncode",
+            Self::PostalCode => "postalcode",
+            Self::Country => "country",
+            Self::Other => unreachable!("raw frames retain their source name"),
         }
     }
 }
@@ -431,7 +481,14 @@ impl<'a> Frame<'a> {
                 span,
             }),
         };
-        Self { name, tag, kind }
+        Self { tag, kind }
+    }
+
+    fn diagnostic_name(&self) -> &str {
+        match &self.kind {
+            FrameKind::Raw(value) => value.name.as_ref(),
+            _ => self.tag.as_str(),
+        }
     }
 
     fn child_type(&self, tag: Tag) -> FrameType {
@@ -602,7 +659,7 @@ impl<'a> Frame<'a> {
     }
 
     fn attach(&mut self, child: Frame<'a>) -> Option<Range<usize>> {
-        let Frame { tag, kind, .. } = child;
+        let Frame { tag, kind } = child;
         if let FrameKind::Raw(value) = kind {
             self.push_node(XmlNode::Element(value));
             return None;

@@ -1246,10 +1246,10 @@ fn start_preserving_known(
 
     for (index, (name, value)) in known.iter().enumerate() {
         let bit = 1_u64 << index;
-        if emitted & bit == 0
-            && let Some(value) = value
-        {
-            write_attr(writer, name, value)?;
+        if emitted & bit == 0 {
+            if let Some(value) = value {
+                write_attr(writer, name, value)?;
+            }
         }
     }
 

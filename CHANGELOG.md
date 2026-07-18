@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Added cross-platform CI for Rust 1.85 and stable, including formatting, Clippy, tests, rustdoc, and package verification.
+- Expanded the README with generation, owned-processing, extension-mutation, validation-profile, and interoperability guidance.
+
+### Changed
+
+- Lowered the declared minimum supported Rust version from 1.88 to 1.85 for the v1 compatibility baseline, including an MSRV-compatible Criterion version and syntax.
+
 ## [0.5.0] - 2026-06-30
 
 ### Fixed
